@@ -1,4 +1,4 @@
-"""SQLAlchemy models (Phase 1–5: audit, features, evidence, proposals, risk)."""
+"""SQLAlchemy models (Phase 1–6: audit through paper/backtest ledger rows)."""
 
 from __future__ import annotations
 
@@ -179,6 +179,112 @@ class RiskDecisionRow(Base):
     market_state_refs: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
     decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class OrderRow(Base):
+    """Order state — paper and live distinguished by ledger_kind (Phase 6 writes paper only)."""
+
+    __tablename__ = "orders"
+    __table_args__ = (
+        UniqueConstraint("client_order_id", "ledger_kind", name="uq_orders_client_ledger"),
+    )
+
+    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    intent_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), nullable=False)
+    client_order_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    exchange_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    ledger_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(32), nullable=False, default="toobit")
+    market_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    side: Mapped[str] = mapped_column(String(16), nullable=False)
+    order_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    quantity: Mapped[str] = mapped_column(String(64), nullable=False)
+    filled_quantity: Mapped[str] = mapped_column(String(64), nullable=False, default="0")
+    price: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class FillRow(Base):
+    __tablename__ = "fills"
+
+    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    order_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), nullable=False)
+    ledger_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(32), nullable=False, default="toobit")
+    market_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    quantity: Mapped[str] = mapped_column(String(64), nullable=False)
+    price: Mapped[str] = mapped_column(String(64), nullable=False)
+    fee: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    fee_asset: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    exchanged_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class PositionRow(Base):
+    __tablename__ = "positions"
+    __table_args__ = (
+        UniqueConstraint(
+            "ledger_kind",
+            "exchange",
+            "market_type",
+            "symbol",
+            name="uq_positions_ledger_instrument",
+        ),
+    )
+
+    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    ledger_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(32), nullable=False, default="toobit")
+    market_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    quantity: Mapped[str] = mapped_column(String(64), nullable=False)
+    entry_price: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    unrealized_pnl: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class PaperBalanceRow(Base):
+    """Paper cash balances only — ledger_kind must remain 'paper'."""
+
+    __tablename__ = "paper_balances"
+    __table_args__ = (
+        UniqueConstraint("ledger_kind", "asset", name="uq_paper_balances_ledger_asset"),
+    )
+
+    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    ledger_kind: Mapped[str] = mapped_column(String(16), nullable=False, default="paper")
+    asset: Mapped[str] = mapped_column(String(32), nullable=False)
+    balance: Mapped[str] = mapped_column(String(64), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class BacktestRunRow(Base):
+    __tablename__ = "backtest_runs"
+
+    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    strategy_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    strategy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    dataset_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    seed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    software_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    splits: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    assumptions: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    train_metrics: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    validation_metrics: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    oos_metrics: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    uncertainty_notes: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    disclaimer: Mapped[str] = mapped_column(Text, nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

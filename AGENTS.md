@@ -6,8 +6,8 @@ Source of truth for product and architecture: [`docs/`](docs/). Phase guides: [`
 
 ## Current state
 
-- **Implemented through Phase 5:** foundation, market data, feature engine, five analysts, evidence packages, Jev (official TypeSafe System One or unavailable mock), LLM Supervisor (schema proposals / fail-closed NO_TRADE), Deterministic Risk Engine (APPROVE/REJECT; draft policy keeps financial limits UNAPPROVED). LLM provider choice, spend budgets, and risk-policy numerics remain owner-approved / empty-or-draft by default.
-- **Stubbed:** `validation`, `orders`, `paper`, `backtest`, `reconcile`.
+- **Implemented through Phase 6:** foundation, market data, feature engine, five analysts, evidence packages, Jev (official TypeSafe System One or unavailable mock), LLM Supervisor (schema proposals / fail-closed NO_TRADE), Deterministic Risk Engine (APPROVE/REJECT; draft policy keeps financial limits UNAPPROVED), paper broker + deterministic backtest (paper ledger only; no live submit). LLM provider choice, spend budgets, and risk-policy numerics remain owner-approved / empty-or-draft by default.
+- **Stubbed:** `validation`, `orders`, `reconcile` (live exchange path).
 - **Exchange adapter:** credential-plane placeholder only; live submit is not supported.
 - **Default mode:** paper. Live trading requires explicit owner approval and all live gates.
 

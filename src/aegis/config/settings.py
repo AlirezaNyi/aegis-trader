@@ -145,6 +145,20 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("AEGIS_REQUIRE_DATABASE", "require_database"),
     )
 
+    # Paper / backtest simulation knobs — engineering assumptions only, NOT risk policy.
+    paper_fee_bps: Decimal = Field(
+        default=Decimal("10"),
+        validation_alias=AliasChoices("AEGIS_PAPER_FEE_BPS", "paper_fee_bps"),
+        ge=0,
+        description="Simulated fee in basis points (paper/backtest only).",
+    )
+    paper_slippage_bps: Decimal = Field(
+        default=Decimal("5"),
+        validation_alias=AliasChoices("AEGIS_PAPER_SLIPPAGE_BPS", "paper_slippage_bps"),
+        ge=0,
+        description="Simulated slippage in basis points (paper/backtest only).",
+    )
+
     @field_validator("log_level")
     @classmethod
     def _normalize_log_level(cls, value: str) -> str:
