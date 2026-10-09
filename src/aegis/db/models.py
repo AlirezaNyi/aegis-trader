@@ -1,4 +1,4 @@
-"""SQLAlchemy models (Phase 1 audit + Phase 3 features/evidence)."""
+"""SQLAlchemy models (Phase 1–4: audit, features, evidence, proposals)."""
 
 from __future__ import annotations
 
@@ -103,6 +103,58 @@ class StrategyExperimentRow(Base):
     parameters: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft")
     leakage_controls: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class JevResultRow(Base):
+    __tablename__ = "jev_results"
+
+    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    evidence_package_id: Mapped[Any | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    answers: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    usage: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    confidence_notes: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class TradeProposalRow(Base):
+    __tablename__ = "trade_proposals"
+
+    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    correlation_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(32), nullable=False, default="toobit")
+    market_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(8), nullable=False)
+    strategy_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    strategy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    action: Mapped[str] = mapped_column(String(16), nullable=False)
+    direction: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    entry_conditions: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    stop_loss: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    take_profit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    sizing: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    leverage: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    evidence_refs: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    analyst_results: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    jev_result: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    uncertainty: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    invalidation: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    supervisor_model_meta: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

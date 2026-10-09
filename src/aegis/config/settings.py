@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from enum import StrEnum
 from functools import lru_cache
+from typing import Any
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -13,6 +15,15 @@ class TradingMode(StrEnum):
     DEVELOPMENT = "development"
     PAPER = "paper"
     LIVE = "live"
+
+
+def _empty_str_to_none(value: Any) -> Any:
+    """Treat blank env values as unset optional budgets."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip() == "":
+        return None
+    return value
 
 
 class Settings(BaseSettings):
@@ -90,6 +101,44 @@ class Settings(BaseSettings):
         le=5,
     )
 
+    jev_timeout_seconds: float = Field(
+        default=10.0,
+        validation_alias=AliasChoices("AEGIS_JEV_TIMEOUT_SECONDS", "jev_timeout_seconds"),
+        gt=0,
+    )
+    jev_max_retries: int = Field(
+        default=1,
+        validation_alias=AliasChoices("AEGIS_JEV_MAX_RETRIES", "jev_max_retries"),
+        ge=0,
+        le=1,
+    )
+    jev_model: str = Field(
+        default="jev-latest",
+        validation_alias=AliasChoices("AEGIS_JEV_MODEL", "jev_model"),
+    )
+
+    supervisor_timeout_seconds: float = Field(
+        default=15.0,
+        validation_alias=AliasChoices(
+            "AEGIS_SUPERVISOR_TIMEOUT_SECONDS", "supervisor_timeout_seconds"
+        ),
+        gt=0,
+    )
+    llm_token_budget: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("AEGIS_LLM_TOKEN_BUDGET", "llm_token_budget"),
+    )
+    llm_cost_budget: Decimal | None = Field(
+        default=None,
+        validation_alias=AliasChoices("AEGIS_LLM_COST_BUDGET", "llm_cost_budget"),
+    )
+    llm_latency_budget_ms: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "AEGIS_LLM_LATENCY_BUDGET_MS", "llm_latency_budget_ms"
+        ),
+    )
+
     # When False, readiness skips DB connectivity (unit tests).
     require_database: bool = Field(
         default=True,
@@ -106,6 +155,16 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return normalized
 
+    @field_validator(
+        "llm_token_budget",
+        "llm_cost_budget",
+        "llm_latency_budget_ms",
+        mode="before",
+    )
+    @classmethod
+    def _optional_budget_empty_as_none(cls, value: Any) -> Any:
+        return _empty_str_to_none(value)
+
     @model_validator(mode="after")
     def _validate_live_startup(self) -> Settings:
         if self.trading_mode == TradingMode.LIVE and not self.live_armed:
@@ -116,6 +175,20 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         if self.trading_mode == TradingMode.LIVE and self.kill_switch:
             msg = "AEGIS_TRADING_MODE=live cannot start with AEGIS_KILL_SWITCH=true."
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_optional_budgets_positive(self) -> Settings:
+        """When a budget is set, it must be strictly positive (empty remains fail-closed)."""
+        if self.llm_token_budget is not None and self.llm_token_budget <= 0:
+            msg = "AEGIS_LLM_TOKEN_BUDGET must be > 0 when set"
+            raise ValueError(msg)
+        if self.llm_cost_budget is not None and self.llm_cost_budget <= 0:
+            msg = "AEGIS_LLM_COST_BUDGET must be > 0 when set"
+            raise ValueError(msg)
+        if self.llm_latency_budget_ms is not None and self.llm_latency_budget_ms <= 0:
+            msg = "AEGIS_LLM_LATENCY_BUDGET_MS must be > 0 when set"
             raise ValueError(msg)
         return self
 
@@ -130,6 +203,26 @@ class Settings(BaseSettings):
     @property
     def toobit_credentials_present(self) -> bool:
         return bool(self.toobit_api_key.strip() and self.toobit_api_secret.strip())
+
+    @property
+    def llm_configured(self) -> bool:
+        return bool(
+            self.llm_provider.strip()
+            and self.llm_api_key.strip()
+            and self.llm_model.strip()
+        )
+
+    @property
+    def supervisor_budgets_configured(self) -> bool:
+        return (
+            self.llm_token_budget is not None
+            and self.llm_cost_budget is not None
+            and self.llm_latency_budget_ms is not None
+        )
+
+    @property
+    def supervisor_may_call_llm(self) -> bool:
+        return self.llm_configured and self.supervisor_budgets_configured
 
 
 @lru_cache

@@ -6,8 +6,8 @@ Source of truth for product and architecture: [`docs/`](docs/). Phase guides: [`
 
 ## Current state
 
-- **Implemented through Phase 3:** foundation, market data, feature engine, five analysts, evidence packages.
-- **Stubbed:** `validation`, `jev`, `supervisor`, `risk`, `orders`, `paper`, `backtest`, `reconcile`.
+- **Implemented through Phase 4:** foundation, market data, feature engine, five analysts, evidence packages, Jev (official TypeSafe System One or unavailable mock), LLM Supervisor (schema proposals / fail-closed NO_TRADE). LLM provider choice and spend budgets remain owner-approved / empty-by-default.
+- **Stubbed:** `validation`, `risk`, `orders`, `paper`, `backtest`, `reconcile`.
 - **Exchange adapter:** credential-plane placeholder only; live submit is not supported.
 - **Default mode:** paper. Live trading requires explicit owner approval and all live gates.
 

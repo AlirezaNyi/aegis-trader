@@ -24,4 +24,8 @@ class UnavailableJevPort:
             answers={},
             usage={},
             latency_ms=0,
+            confidence_notes=(
+                "Jev confidence is distribution concentration, "
+                "not calibrated probability of profit."
+            ),
         )

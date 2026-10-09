@@ -1,4 +1,8 @@
-"""LLM supervisor port — schema-constrained completions in later phases."""
+"""LLM supervisor port — schema-constrained completions.
+
+Token / cost / latency budgets are enforced by ``aegis.supervisor``, not by LlmPort.
+Provider choice remains UNAPPROVED until the owner selects one.
+"""
 
 from __future__ import annotations
 
@@ -15,7 +19,11 @@ class LlmPort(Protocol):
         schema_name: str,
         timeout_seconds: float,
     ) -> dict[str, Any]:
-        """Return a structured object matching the requested schema."""
+        """Return a structured object matching the requested schema.
+
+        Optional usage metadata may be returned under ``_meta`` (e.g. token counts);
+        the supervisor strips ``_meta`` before schema validation and enforces budgets.
+        """
 
 
 class UnavailableLlmPort:

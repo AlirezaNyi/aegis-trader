@@ -10,7 +10,9 @@ from fastapi import FastAPI
 from aegis import __version__
 from aegis.api.health import router as health_router
 from aegis.config.settings import Settings, get_settings
+from aegis.jev.factory import build_jev_port
 from aegis.logging import configure_logging, get_logger
+from aegis.supervisor.factory import budget_config_from_settings, build_llm_port
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -42,6 +44,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = resolved
+    # Phase 4 ports only — no tick-driven decision loop or order routes (SRS-SV-004).
+    app.state.jev_port = build_jev_port(resolved)
+    app.state.llm_port = build_llm_port(resolved)
+    app.state.supervisor_budgets = budget_config_from_settings(resolved)
     app.include_router(health_router)
     return app
 
