@@ -99,7 +99,7 @@ async def test_soak_debounce_same_final_bar() -> None:
     runner = PaperSoakRunner(
         market_data=md,  # type: ignore[arg-type]
         deps=_deps(),
-        instrument=_instrument(),
+        instruments=(_instrument(),),
         timeframe=Timeframe.M1,
     )
     first = await runner.poll_once(now=now)
@@ -122,7 +122,7 @@ async def test_soak_new_final_bar_runs_again() -> None:
     runner = PaperSoakRunner(
         market_data=md,  # type: ignore[arg-type]
         deps=_deps(),
-        instrument=_instrument(),
+        instruments=(_instrument(),),
         timeframe=Timeframe.M1,
     )
     assert (await runner.poll_once(now=now_a)).ran_cycle is True
@@ -155,13 +155,87 @@ async def test_soak_refuses_live_mode() -> None:
     runner = PaperSoakRunner(
         market_data=md,  # type: ignore[arg-type]
         deps=_deps(settings),  # type: ignore[arg-type]
-        instrument=_instrument(),
+        instruments=(_instrument(),),
         timeframe=Timeframe.M1,
     )
     outcome = await runner.poll_once(now=start + timedelta(seconds=2))
     assert outcome.ran_cycle is False
     assert outcome.skipped_reason == "trading_mode_live"
     assert md.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_soak_multi_symbol_runs_each_new_bar() -> None:
+    start = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
+    ada = InstrumentRef(market_type=MarketType.SPOT, symbol="ADAUSDT")
+    btc = InstrumentRef(market_type=MarketType.SPOT, symbol="BTCUSDT")
+
+    def _sym_candle(inst: InstrumentRef, minutes: int) -> Candle:
+        open_time = start + timedelta(minutes=minutes)
+        return Candle(
+            instrument=inst,
+            interval=Timeframe.M1,
+            open_time=open_time,
+            close_time=open_time + timedelta(minutes=1) - timedelta(milliseconds=1),
+            open=Decimal("1"),
+            high=Decimal("1.01"),
+            low=Decimal("0.99"),
+            close=Decimal("1"),
+            volume=Decimal("100"),
+            is_final=True,
+            source="fixture",
+            received_at=open_time + timedelta(seconds=1),
+        )
+
+    class MultiFake:
+        def __init__(self) -> None:
+            self.by_symbol = {
+                "ADAUSDT": [_sym_candle(ada, i) for i in range(25)],
+                "BTCUSDT": [_sym_candle(btc, i) for i in range(25)],
+            }
+            self.calls = 0
+
+        def get_candles(
+            self,
+            instrument: InstrumentRef,
+            interval: Timeframe,
+            *,
+            limit: int = 100,
+        ) -> list[Candle]:
+            _ = interval, limit
+            self.calls += 1
+            return list(self.by_symbol[instrument.symbol])
+
+    md = MultiFake()
+    now = start + timedelta(minutes=25, seconds=2)
+    runner = PaperSoakRunner(
+        market_data=md,  # type: ignore[arg-type]
+        deps=_deps(),
+        instruments=(ada, btc),
+        timeframe=Timeframe.M1,
+    )
+    outcome = await runner.poll_once(now=now)
+    assert outcome.ran_cycle is True
+    assert runner.cycles_run == 2
+    assert md.calls == 2
+    assert runner.symbols == ["ADAUSDT", "BTCUSDT"]
+
+
+def test_parse_soak_symbols_csv_and_cap() -> None:
+    from aegis.pipeline.soak import parse_soak_symbols
+
+    assert parse_soak_symbols("adausdt, BTCUSDT;ETHUSDT") == [
+        "ADAUSDT",
+        "BTCUSDT",
+        "ETHUSDT",
+    ]
+    with pytest.raises(ValueError, match="at most"):
+        parse_soak_symbols(",".join(f"S{i}USDT" for i in range(11)))
+
+
+def test_settings_normalizes_multi_symbol() -> None:
+    s = _settings(paper_soak_symbol="adaUsdt, btcusdt")
+    assert s.paper_soak_symbol == "ADAUSDT,BTCUSDT"
 
 
 def test_create_app_soak_off_keeps_null_execution() -> None:

@@ -48,7 +48,7 @@ Also set: `AEGIS_ANALYST_CONCURRENCY`, analyst/Jev/supervisor timeouts, uvicorn 
 | `TYPESAFE_API_KEY` | Jev | optional; mock if absent |
 | `LLM_*` / `AEGIS_LLM_*` | Supervisor provider | optional until chosen |
 
-`.env.example` must contain placeholders only. Compose sets empty credential env vars — do not bake secrets into the image.
+`.env.example` must contain placeholders only. Compose loads the host `.env` via `env_file` at runtime (not baked into the image). Compose still forces `AEGIS_TRADING_MODE=paper`, `AEGIS_LIVE_ARMED=false`, and an in-network `DATABASE_URL` to `postgres`. Do not commit real secrets.
 
 ## 4. Networking
 

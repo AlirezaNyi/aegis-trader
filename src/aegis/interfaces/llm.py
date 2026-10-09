@@ -1,7 +1,8 @@
 """LLM supervisor port — schema-constrained completions.
 
 Token / cost / latency budgets are enforced by ``aegis.supervisor``, not by LlmPort.
-Provider choice remains UNAPPROVED until the owner selects one.
+Owner-selected OpenAI-compatible providers: ``gemini``, ``openrouter``, ``groq``
+(see ``aegis.supervisor.factory.build_llm_port``). Empty config → UnavailableLlmPort.
 """
 
 from __future__ import annotations

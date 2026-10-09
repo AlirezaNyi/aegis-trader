@@ -27,7 +27,7 @@ Passing tests do not establish profitability or guarantee safety.
 | 3 | Missing/stale critical data blocks new orders | **PASS** (draft UNAPPROVED + integrity hard-fails; continuous `validation` stage still stubbed) |
 | 4 | Ambiguous submit → reconcile, not blind retry | **PASS** |
 | 5 | Duplicate order prevention | **PASS** (clientOrderId + attempt tracker; RP duplicate window when approved) |
-| 6 | Credentials inaccessible to analysts/Jev/LLM | **PASS** (Settings on `app.state` is residual T-11 surface) |
+| 6 | Credentials inaccessible to analysts/Jev/LLM | **PASS** (M5 remediated: no full Settings on `app.state`; host/env T-11 remains) |
 | 7 | Withdrawal not requested | **PASS** |
 | 8 | Risk policies versioned / deterministic / auditable | **PASS** — owner policy **`1.0`** approved 2026-10-09; live still disarmed |
 | 9 | Orders/fills/positions/balances reconcile vs exchange | **GAP** — per-order get_order only; no inventory reconcile |
@@ -56,7 +56,7 @@ None for paper posture. Live activation remains owner-blocked by design (UNAPPRO
 | M2 | *(Resolved for paper)* Owner policy `1.0` signed; live still requires explicit arming + inventory reconcile | `risk/owner_v1.py`, `docs/RISK_POLICY.md` | Paper can APPROVE under v1.0; live not armed by policy load |
 | M3 | Emergency cancel/protect automation UNAPPROVED | ADR 0006; `OPERATIONS.md` §4.2–4.3 | Kill blocks new orders only; open exposure needs owner action |
 | M4 | Backup restore / alert delivery not E2E proven | `READINESS_REPORT.md`; alert dry-run only | Ops “tested” claim incomplete for live |
-| M5 | Full `Settings` (incl. secrets) on `app.state` | `main.py`, threat model T-11 | Miswired dump endpoint could leak credentials |
+| M5 | Full `Settings` (incl. secrets) on `app.state` | **Remediated 2026-10-09:** `app.state.runtime` + `database_probe`; secrets cleared on cycle deps; `tests/test_runtime_public.py` | Residual: hosts/env still hold secrets (T-11) |
 
 ### LOW / INFORMATIONAL
 

@@ -128,6 +128,7 @@ Spot API v2 order shape: **Unverified** for Aegis design until read and accepted
 | Futures quantity unit: contracts vs token vs `contractMultiplier` | Docs conflict / incomplete | **Unresolved** |
 | Hedge mode requirement for `positionSide` | | **Unverified** |
 | Futures private balance/position REST beyond v2 snippets | Partial on docs; full inventory **Unverified** for design freeze | Interface until re-check |
+| Account inventory reconcile (balances + positions vs ledger) | Re-checked 2026-10-09 against this register | **Still Unverified** — do not implement signed inventory reads until Spot Account/Trade and USDT-M v2 pages are re-accepted with explicit paths; audit M1 remains open |
 | Futures private user stream parity with Spot `userDataStream` | Spot listenKey verified; futures private WS details | **Unverified** |
 
 ### 3.5 Order statuses (**Verified**)
@@ -176,9 +177,14 @@ Never include: Toobit keys, signatures, withdraw addresses, full account credent
 
 ## 5. LLM Supervisor provider contract (Internal)
 
-* Provider-agnostic interface: `complete_structured(prompt, schema, timeout, budget)`.
+* Provider-agnostic interface: `complete_structured(prompt, schema_name, timeout_seconds)`.
 * Output must validate against TradeProposal schema or fail closed to NO_TRADE.
-* Provider choice, timeouts, and budgets: **UNAPPROVED** owner decision.
+* Owner-selected OpenAI-compatible adapters (2026-10-09; gemini added for personal free accounts):
+  * `gemini` → `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions` ([OpenAI compatibility](https://ai.google.dev/gemini-api/docs/openai))
+  * `openrouter` → `https://openrouter.ai/api/v1/chat/completions`
+  * `groq` → `https://api.groq.com/openai/v1/chat/completions`
+* Budgets and model ids remain owner env decisions; empty budgets fail closed.
+* Free-tier rate limits are provider-owned and may change — do not hard-code RPD/RPM as risk policy.
 
 ---
 

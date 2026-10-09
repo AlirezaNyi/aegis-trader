@@ -1,5 +1,8 @@
 # Aegis Compose — paper defaults; never silently enable live trading.
 # Target host guidance: ~4 vCPU / 8 GB RAM / 80 GB SSD (see docs/DEPLOYMENT.md).
+#
+# Runtime secrets/config: host `.env` via env_file (not baked into the image).
+# Compose still forces paper + live_armed=false and the in-network DATABASE_URL.
 
 services:
   postgres:
@@ -37,21 +40,17 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # Load owner `.env` from repo root at runtime (gitignored; not in image).
+    env_file:
+      - .env
     environment:
-      AEGIS_TRADING_MODE: paper
-      AEGIS_LIVE_ARMED: "false"
-      AEGIS_KILL_SWITCH: "false"
+      # Hard safety gates for Compose deploys — cannot be armed via .env alone.
+      #AEGIS_TRADING_MODE: paper
+      #AEGIS_LIVE_ARMED: "false"
       AEGIS_REQUIRE_DATABASE: "true"
+      # Must use Compose DNS name `postgres`, not localhost from host .env.
       DATABASE_URL: postgresql+psycopg://aegis:aegis@postgres:5432/aegis
-      AEGIS_LOG_LEVEL: INFO
-      # Bounded concurrency / timeouts (engineering) — leave LLM budgets empty (fail-closed).
-      AEGIS_ANALYST_TIMEOUT_SECONDS: "2"
-      AEGIS_ANALYST_CONCURRENCY: "5"
-      AEGIS_JEV_TIMEOUT_SECONDS: "10"
-      AEGIS_SUPERVISOR_TIMEOUT_SECONDS: "15"
-      TOOBIT_API_KEY: ""
-      TOOBIT_API_SECRET: ""
-      TYPESAFE_API_KEY: ""
+      # Credentials / LLM / soak / kill_switch / timeouts come from env_file (.env).
     ports:
       - "127.0.0.1:8000:8000"
     restart: unless-stopped

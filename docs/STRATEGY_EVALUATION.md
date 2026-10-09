@@ -84,6 +84,8 @@ Paper trading uses the same analytical and risk path as intended for live, with 
 
 Until these are approved, paper trading may run for learning and system soak tests, but live activation review cannot claim “evaluation criteria met.”
 
+Pending-owner register for this stage: [OWNER_PENDING_DECISIONS.md](OWNER_PENDING_DECISIONS.md).
+
 ## 5. Promotion rules (**UNAPPROVED**)
 
 Strategy eligibility and promotion from research → paper → live-candidate require owner criteria (PRD §21). No automatic promotion.

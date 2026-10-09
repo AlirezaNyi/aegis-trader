@@ -12,6 +12,11 @@ from aegis import __version__
 from aegis.api.health import router as health_router
 from aegis.api.metrics import router as metrics_router
 from aegis.api.middleware import CorrelationIdMiddleware
+from aegis.config.runtime_public import (
+    make_database_probe,
+    runtime_public_from_settings,
+    settings_without_secrets,
+)
 from aegis.config.settings import Settings, TradingMode, get_settings
 from aegis.interfaces.execution import NullExecutionPort
 from aegis.jev.factory import build_jev_port
@@ -28,7 +33,7 @@ from aegis.pipeline.cycle import PaperCycleDeps, run_paper_cycle
 from aegis.pipeline.soak import (
     PaperSoakRunner,
     run_soak_loop,
-    soak_instrument_from_settings,
+    soak_instruments_from_settings,
     soak_timeframe_from_settings,
 )
 from aegis.reconcile.service import Reconciler
@@ -75,10 +80,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if _should_start_paper_soak(resolved):
                 rest_client = ToobitRestMarketDataClient()
                 gateway = MarketDataGateway(rest_client)
+                instruments = soak_instruments_from_settings(resolved)
                 runner = PaperSoakRunner(
                     market_data=gateway,
                     deps=_app.state.paper_cycle_deps,
-                    instrument=soak_instrument_from_settings(resolved),
+                    instruments=instruments,
                     timeframe=soak_timeframe_from_settings(resolved),
                 )
                 _app.state.paper_soak_runner = runner
@@ -91,8 +97,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     name="aegis-paper-soak",
                 )
                 logger.info(
-                    "paper_soak_started symbol=%s interval=%s poll=%s",
-                    resolved.paper_soak_symbol,
+                    "paper_soak_started symbols=%s interval=%s poll=%s",
+                    ",".join(i.symbol for i in instruments),
                     resolved.paper_soak_interval,
                     resolved.paper_soak_poll_seconds,
                     extra={"event": "paper_soak_started", "component": "main"},
@@ -125,21 +131,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.add_middleware(CorrelationIdMiddleware)
-    app.state.settings = resolved
+    # Audit M5: never attach full Settings (secrets) to app.state for HTTP handlers.
+    app.state.runtime = runtime_public_from_settings(resolved)
+    app.state.database_probe = make_database_probe(resolved)
     app.state.ops_metrics = ops_metrics
     app.state.shutdown_gate = shutdown_gate
     app.state.alert_evaluator = alert_evaluator
     # Phase 4–7 ports + paper cycle / optional soak. No LLM-on-every-tick loop.
     # Live Toobit client not constructed (SRS-SV-004).
+    # Build credentialed ports from full Settings, then redact for request-adjacent deps.
     app.state.jev_port = build_jev_port(resolved)
     app.state.llm_port = build_llm_port(resolved)
     app.state.supervisor_budgets = budget_config_from_settings(resolved)
     # Risk policy from AEGIS_RISK_POLICY_VERSION (default owner v1.0). Does not arm live.
     app.state.risk_policy = build_risk_policy_from_settings(resolved)
+    safe_settings = settings_without_secrets(resolved)
     # Paper ledger — simulation only.
     paper_ledger = PaperLedger()
     app.state.paper_ledger = paper_ledger
-    paper_broker = PaperBroker(settings=resolved, ledger=paper_ledger)
+    paper_broker = PaperBroker(settings=safe_settings, ledger=paper_ledger)
     app.state.paper_broker = paper_broker
     # Order Manager uses NullExecutionPort until owner arms live + wires build_execution_port.
     null_execution = NullExecutionPort()
@@ -147,13 +157,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.execution_port = null_execution
     app.state.reconciler = reconciler
     app.state.order_manager = OrderManager(
-        settings=resolved,
+        settings=safe_settings,
         execution=null_execution,
         reconciler=reconciler,
     )
     # Paper decision cycle deps — callable on finalized candles only.
     paper_cycle_deps = PaperCycleDeps(
-        settings=resolved,
+        settings=safe_settings,
         risk_policy=app.state.risk_policy,
         jev_port=app.state.jev_port,
         llm_port=app.state.llm_port,

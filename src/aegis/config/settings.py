@@ -72,6 +72,7 @@ class Settings(BaseSettings):
     llm_provider: str = Field(
         default="",
         validation_alias=AliasChoices("AEGIS_LLM_PROVIDER", "llm_provider"),
+        description="Owner-selected provider: gemini | openrouter | groq (empty → UnavailableLlmPort).",
     )
     llm_api_key: str = Field(
         default="",
@@ -80,6 +81,21 @@ class Settings(BaseSettings):
     llm_model: str = Field(
         default="",
         validation_alias=AliasChoices("AEGIS_LLM_MODEL", "llm_model"),
+    )
+    llm_base_url: str = Field(
+        default="",
+        validation_alias=AliasChoices("AEGIS_LLM_BASE_URL", "llm_base_url"),
+        description="Optional OpenAI-compatible base URL override (no trailing path).",
+    )
+    llm_http_referer: str = Field(
+        default="",
+        validation_alias=AliasChoices("AEGIS_LLM_HTTP_REFERER", "llm_http_referer"),
+        description="Optional OpenRouter HTTP-Referer header (non-secret).",
+    )
+    llm_app_title: str = Field(
+        default="Aegis",
+        validation_alias=AliasChoices("AEGIS_LLM_APP_TITLE", "llm_app_title"),
+        description="Optional OpenRouter X-Title header (non-secret).",
     )
 
     log_level: str = Field(
@@ -172,7 +188,10 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices(
             "AEGIS_PAPER_SOAK_SYMBOL", "paper_soak_symbol"
         ),
-        description="Spot symbol for paper soak REST polls.",
+        description=(
+            "Spot symbol(s) for paper soak REST polls. "
+            "Comma-separated list allowed (max 10), e.g. ADAUSDT,BTCUSDT."
+        ),
     )
     paper_soak_interval: str = Field(
         default="1m",
@@ -246,11 +265,9 @@ class Settings(BaseSettings):
     @field_validator("paper_soak_symbol")
     @classmethod
     def _normalize_paper_soak_symbol(cls, value: str) -> str:
-        symbol = value.strip().upper()
-        if not symbol:
-            msg = "AEGIS_PAPER_SOAK_SYMBOL must be non-empty"
-            raise ValueError(msg)
-        return symbol
+        from aegis.pipeline.soak import parse_soak_symbols
+
+        return ",".join(parse_soak_symbols(value))
 
     @field_validator(
         "llm_token_budget",
@@ -277,12 +294,12 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_optional_budgets_positive(self) -> Settings:
-        """When a budget is set, it must be strictly positive (empty remains fail-closed)."""
+        """When a budget is set, token/latency must be > 0; cost may be 0 for free tiers."""
         if self.llm_token_budget is not None and self.llm_token_budget <= 0:
             msg = "AEGIS_LLM_TOKEN_BUDGET must be > 0 when set"
             raise ValueError(msg)
-        if self.llm_cost_budget is not None and self.llm_cost_budget <= 0:
-            msg = "AEGIS_LLM_COST_BUDGET must be > 0 when set"
+        if self.llm_cost_budget is not None and self.llm_cost_budget < 0:
+            msg = "AEGIS_LLM_COST_BUDGET must be >= 0 when set (0 = free-tier ceiling)"
             raise ValueError(msg)
         if self.llm_latency_budget_ms is not None and self.llm_latency_budget_ms <= 0:
             msg = "AEGIS_LLM_LATENCY_BUDGET_MS must be > 0 when set"

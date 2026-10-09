@@ -326,8 +326,8 @@ def test_approved_policy_healthy_context_approves_buy() -> None:
     assert decision.validated_order_params is not None
     assert decision.validated_order_params["action"] == "BUY"
     assert decision.validated_order_params["stop_loss_fill_not_guaranteed"] is True
-    assert may_submit_to_order_manager(decision) is True
-    assert_may_submit_to_order_manager(decision)
+    assert may_submit_to_order_manager(decision, now=_now()) is True
+    assert_may_submit_to_order_manager(decision, now=_now())
 
 
 def test_notional_over_max_reject() -> None:

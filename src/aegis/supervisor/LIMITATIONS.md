@@ -8,11 +8,22 @@
 
 ## LLM provider
 
-* Provider choice remains **UNAPPROVED**. `build_llm_port` returns `UnavailableLlmPort` until an owner-approved adapter exists.
-* Empty `AEGIS_LLM_PROVIDER` / key / model **or** empty token/cost/latency budgets → `NO_TRADE` with **no network call**.
-* Token, cost, and latency budgets are enforced by the supervisor, not by `LlmPort`.
+* Supported OpenAI-compatible adapters (owner env): **`gemini`**, **`openrouter`**, **`groq`**.
+  * Defaults:
+    * Gemini `https://generativelanguage.googleapis.com/v1beta/openai` (official OpenAI-compat)
+    * OpenRouter `https://openrouter.ai/api/v1`
+    * Groq `https://api.groq.com/openai/v1`
+  * Override with `AEGIS_LLM_BASE_URL` when needed.
+* Recommended free soak for **personal** accounts (medium volume): **`gemini`** + a free Flash model from AI Studio (e.g. `gemini-2.5-flash`). Create key at aistudio.google.com — org/Groq signup not required.
+* OpenRouter `:free` (~50 RPD without purchased credits) is for low-volume manual tests only.
+* Groq remains supported if the owner can create an account; some personal signups are blocked without an organization.
+* Empty / unknown `AEGIS_LLM_PROVIDER` or missing key/model → `UnavailableLlmPort` → `NO_TRADE` with **no network call**.
+* Empty token/cost/latency budgets → `NO_TRADE` with **no network call**.
+* `AEGIS_LLM_COST_BUDGET=0` is allowed for free tiers; adapter always reports `_meta.cost` (0 when upstream omits cost).
+* Token and latency budgets must still be **> 0** when set.
 * When budgets are set, LLM `_meta` must include token and cost usage; missing usage → NO_TRADE.
 * Evidence dumped into prompts is scrubbed with the same credential redactor as the Jev adapter.
+* API keys are never logged; HTTP error messages omit response bodies.
 
 ## Gates
 
@@ -28,5 +39,6 @@
 
 ## Deferred
 
-* Cost is checked against provider-reported `_meta.cost` when present; no live pricing table is hard-coded.
-* Concrete LLM HTTP adapters are out of scope until owner selects a provider.
+* Cost is checked against provider-reported `_meta.cost` when present; free adapters map missing cost to `0`.
+* Provider free-tier rate limits change over time — re-check Groq / OpenRouter docs before relying on soak volume.
+* Jev remains TypeSafe-only (not OpenRouter).

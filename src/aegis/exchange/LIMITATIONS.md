@@ -21,7 +21,7 @@
 * Hedge-mode requirement for `positionSide` — unverified
 * Futures orderTest equivalent — unverified
 * Batch orders, amend, algo/plan orders, leverage set — not implemented in Phase 7
-* Balance / position REST inventory — interface / reconcile of single orders only
+* Balance / position REST inventory — **Unverified** (re-checked 2026-10-09 in API_CONTRACTS); reconcile remains per-order `get_order` only (audit M1 open)
 * Live client is **not** constructed by `create_app` in this phase — parent wires factory
 * Agent Trade Kit / MCP order tools — forbidden (ADR 0007)
 

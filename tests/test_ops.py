@@ -84,4 +84,14 @@ def test_compose_declares_resource_limits() -> None:
     assert "mem_limit: 2g" in text
     assert "AEGIS_TRADING_MODE: paper" in text
     assert 'AEGIS_LIVE_ARMED: "false"' in text
+    # Safety gates must not be commented out (host .env may set live).
+    assert "#AEGIS_TRADING_MODE" not in text
+    assert "#AEGIS_LIVE_ARMED" not in text
     assert "healthcheck:" in text
+    assert "env_file:" in text
+    assert "- .env" in text
+    # Must not blank credentials after env_file (secrets come from host .env).
+    assert 'TOOBIT_API_KEY: ""' not in text
+    assert 'TOOBIT_API_SECRET: ""' not in text
+    # Compose DB host must stay on the postgres service, not host localhost.
+    assert "postgresql+psycopg://aegis:aegis@postgres:5432/aegis" in text

@@ -228,6 +228,31 @@ def test_empty_budgets_no_trade_without_llm_call() -> None:
     assert llm.calls == 0
 
 
+def test_zero_cost_budget_allows_free_tier_call() -> None:
+    """Free providers: cost_budget=0 and _meta.cost=0 must not fail closed."""
+    package = _evidence()
+    jev = _jev()
+    free_budgets = BudgetConfig(
+        token_budget=8000,
+        cost_budget=Decimal("0"),
+        latency_budget_ms=15000,
+    )
+    llm = CountingLlm(
+        response=_with_usage_meta(
+            _valid_llm_proposal(package, jev, action="NO_TRADE"),
+            total_tokens=120,
+            cost=0,
+        )
+    )
+    result = supervise(package, jev, llm, budgets=free_budgets)
+    assert llm.calls == 1
+    assert result.action == ProposalAction.NO_TRADE
+    assert "llm_cost_budget_exceeded" not in result.uncertainty.get("reasons", [])
+    assert "supervisor_budgets_not_configured" not in result.uncertainty.get(
+        "reasons", []
+    )
+
+
 def _with_usage_meta(payload: dict[str, Any], **meta: Any) -> dict[str, Any]:
     base_meta = {"total_tokens": 100, "cost": "0.01"}
     base_meta.update(meta)

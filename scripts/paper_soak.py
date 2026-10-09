@@ -27,10 +27,11 @@ from aegis.market_data.rest_client import ToobitRestMarketDataClient  # noqa: E4
 from aegis.ops.shutdown import ShutdownGate  # noqa: E402
 from aegis.paper.broker import PaperBroker  # noqa: E402
 from aegis.pipeline.cycle import PaperCycleDeps  # noqa: E402
+from aegis.pipeline.review import format_review_text, summarize_soak_outcome  # noqa: E402
 from aegis.pipeline.soak import (  # noqa: E402
     PaperSoakRunner,
     run_soak_loop,
-    soak_instrument_from_settings,
+    soak_instruments_from_settings,
     soak_timeframe_from_settings,
 )
 from aegis.risk.factory import build_risk_policy_from_settings  # noqa: E402
@@ -60,15 +61,12 @@ async def _main(once: bool) -> int:
         runner = PaperSoakRunner(
             market_data=MarketDataGateway(rest),
             deps=deps,
-            instrument=soak_instrument_from_settings(settings),
+            instruments=soak_instruments_from_settings(settings),
             timeframe=soak_timeframe_from_settings(settings),
         )
         if once:
             outcome = await runner.poll_once()
-            print(
-                f"ran_cycle={outcome.ran_cycle} skipped={outcome.skipped_reason} "
-                f"final_open={outcome.final_open_time}"
-            )
+            print(format_review_text(summarize_soak_outcome(outcome)))
             return 0
         gate = ShutdownGate()
         await run_soak_loop(

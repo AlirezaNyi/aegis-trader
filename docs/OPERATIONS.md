@@ -123,3 +123,5 @@ Do not auto-complete. Owner must review:
 * Retention periods.
 * Whether emergencies may auto-cancel or auto-close.
 * SLA for unknown-order resolution.
+
+Tracked without invented values in [OWNER_PENDING_DECISIONS.md](OWNER_PENDING_DECISIONS.md). Paper soak evidence: [PAPER_EVALUATION_REPORT.md](PAPER_EVALUATION_REPORT.md).

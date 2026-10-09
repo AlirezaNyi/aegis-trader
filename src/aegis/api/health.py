@@ -7,9 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
-from aegis.config.settings import Settings
-from aegis.db.session import check_database
-from aegis.guards.live import live_execution_permitted, trading_ready
+from aegis.config.runtime_public import DatabaseProbe, RuntimePublicState
 from aegis.market_data.metrics import MarketDataMetrics
 from aegis.ops.shutdown import ShutdownGate
 
@@ -23,21 +21,19 @@ def health() -> dict[str, str]:
 
 @router.get("/ready")
 def ready(request: Request) -> dict[str, Any]:
-    settings: Settings = request.app.state.settings
+    runtime: RuntimePublicState = request.app.state.runtime
+    probe: DatabaseProbe = request.app.state.database_probe
     shutdown: ShutdownGate | None = getattr(request.app.state, "shutdown_gate", None)
     shutting_down = shutdown.shutting_down if shutdown is not None else False
 
-    db_ok = True
-    db_detail = "skipped"
-    if settings.require_database:
-        db_ok, db_detail = check_database(settings.database_url)
+    db_ok, db_detail = probe()
 
-    mode_ready = trading_ready(settings)
+    mode_ready = runtime.trading_ready
     # Kill switch must fail /ready closed in all modes (not only live).
     ready_flag = (
         db_ok
-        and not settings.kill_switch
-        and (settings.is_paper_or_dev or mode_ready)
+        and not runtime.kill_switch
+        and (runtime.is_paper_or_dev or mode_ready)
         and not shutting_down
     )
 
@@ -51,14 +47,14 @@ def ready(request: Request) -> dict[str, Any]:
     return {
         "ready": ready_flag,
         "service": "aegis",
-        "trading_mode": settings.trading_mode.value,
-        "live_armed": settings.live_armed,
-        "kill_switch": settings.kill_switch,
+        "trading_mode": runtime.trading_mode.value,
+        "live_armed": runtime.live_armed,
+        "kill_switch": runtime.kill_switch,
         "trading_ready": mode_ready,
-        "live_execution_permitted": live_execution_permitted(settings),
+        "live_execution_permitted": runtime.live_execution_permitted,
         "database": {"ok": db_ok, "detail": db_detail},
         "market_data": market_data,
-        "jev_configured": settings.jev_configured,
+        "jev_configured": runtime.jev_configured,
         "phase": 8,
         "live_submit_client": "not_constructed",
         "shutting_down": shutting_down,
