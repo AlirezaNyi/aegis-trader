@@ -21,6 +21,7 @@ from aegis.ops.shutdown import ShutdownGate
 from aegis.orders.manager import OrderManager
 from aegis.paper.broker import PaperBroker
 from aegis.paper.ledger import PaperLedger
+from aegis.pipeline.cycle import PaperCycleDeps, run_paper_cycle
 from aegis.reconcile.service import Reconciler
 from aegis.risk.factory import build_risk_policy_from_settings
 from aegis.supervisor.factory import budget_config_from_settings, build_llm_port
@@ -72,7 +73,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.ops_metrics = ops_metrics
     app.state.shutdown_gate = shutdown_gate
     app.state.alert_evaluator = alert_evaluator
-    # Phase 4–7 ports — no tick loop; live Toobit client not constructed (SRS-SV-004).
+    # Phase 4–7 ports + paper cycle. No LLM-on-every-tick loop.
+    # Live Toobit client not constructed (SRS-SV-004).
     app.state.jev_port = build_jev_port(resolved)
     app.state.llm_port = build_llm_port(resolved)
     app.state.supervisor_budgets = budget_config_from_settings(resolved)
@@ -81,7 +83,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Paper ledger — simulation only.
     paper_ledger = PaperLedger()
     app.state.paper_ledger = paper_ledger
-    app.state.paper_broker = PaperBroker(settings=resolved, ledger=paper_ledger)
+    paper_broker = PaperBroker(settings=resolved, ledger=paper_ledger)
+    app.state.paper_broker = paper_broker
     # Order Manager uses NullExecutionPort until owner arms live + wires build_execution_port.
     null_execution = NullExecutionPort()
     reconciler = Reconciler(null_execution)
@@ -92,6 +95,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         execution=null_execution,
         reconciler=reconciler,
     )
+    # Paper decision cycle deps — callable on finalized candles only.
+    paper_cycle_deps = PaperCycleDeps(
+        settings=resolved,
+        risk_policy=app.state.risk_policy,
+        jev_port=app.state.jev_port,
+        llm_port=app.state.llm_port,
+        supervisor_budgets=app.state.supervisor_budgets,
+        paper_broker=paper_broker,
+        analyst_concurrency=resolved.analyst_concurrency,
+    )
+    app.state.paper_cycle_deps = paper_cycle_deps
+    app.state.run_paper_cycle = run_paper_cycle
     app.include_router(health_router)
     app.include_router(metrics_router)
     return app
