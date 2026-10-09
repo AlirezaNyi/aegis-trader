@@ -8,6 +8,10 @@ Repository: [AlirezaNyi/aegis-trader](https://github.com/AlirezaNyi/aegis-trader
 
 Product and architecture docs live under [`docs/`](docs/). Phase guides live under [`Phases/`](Phases/).
 
+## Current phase
+
+Phase 3 — deterministic Feature Engine (`features-v1`), five specialized analysts, and Evidence Package builder. Jev, LLM Supervisor, Risk Engine, and live order submission remain disabled / stubbed.
+
 ## Requirements
 
 - Python 3.12+
@@ -41,7 +45,7 @@ docker compose up --build
 ```
 
 - Liveness: `GET /health`
-- Readiness: `GET /ready`
+- Readiness: `GET /ready` (reports `"phase": 3`)
 
 ## Configuration
 
@@ -52,19 +56,25 @@ See [`.env.example`](.env.example) and [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md
 | `AEGIS_TRADING_MODE` | `paper` | `development`, `paper`, or `live` |
 | `AEGIS_LIVE_ARMED` | `false` | Must be true for live execution |
 | `AEGIS_KILL_SWITCH` | `false` | When true, blocks new orders |
+| `AEGIS_ANALYST_TIMEOUT_SECONDS` | `2` | Per-analyst timeout |
+| `AEGIS_ANALYST_CONCURRENCY` | `5` | Max concurrent analysts (1–5) |
 | `DATABASE_URL` | local compose URL | Required for DB-backed readiness |
 
-Live order submission requires `trading_mode=live`, `live_armed=true`, and `kill_switch=false`. Phase 1 does not construct a live exchange submit client.
+Live order submission requires `trading_mode=live`, `live_armed=true`, and `kill_switch=false`. No live exchange submit client is constructed.
 
-## Interfaces
+## Implemented modules
 
-Protocols under `aegis.interfaces` define ports for market data, execution, Jev, LLM, persistence, and clock. Phase 1 ships stubs only—no real Toobit, Jev, or LLM HTTP clients.
+- **Market data (Phase 2):** Toobit public REST/WS adapters, quality checks, fixtures — see [`src/aegis/market_data/LIMITATIONS.md`](src/aegis/market_data/LIMITATIONS.md).
+- **Features & analysts (Phase 3):** [`docs/FEATURES.md`](docs/FEATURES.md), [`src/aegis/analysts/LIMITATIONS.md`](src/aegis/analysts/LIMITATIONS.md).
+- **Interfaces:** Protocols under `aegis.interfaces` for market data, execution, Jev, LLM, persistence, and clock. Execution, Jev, and LLM remain stubs until later phases.
 
 ## Migrations
 
 ```bash
 alembic upgrade head
 ```
+
+Phase 3 adds `feature_snapshots`, `analyst_evidence`, `evidence_packages`, and `strategy_experiments` (alongside Phase 1 `audit_events`).
 
 ## Tests and static checks
 
@@ -79,4 +89,5 @@ mypy src
 - No exchange withdrawal support.
 - Secrets must not be committed.
 - LLMs and Jev never receive exchange credentials.
+- Analysts never submit orders or approve trades.
 - The deterministic Risk Engine (later phases) is the only authority for approving new trades.

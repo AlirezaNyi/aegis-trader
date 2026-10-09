@@ -49,6 +49,6 @@ def ready(request: Request) -> dict[str, Any]:
         "database": {"ok": db_ok, "detail": db_detail},
         "market_data": market_data,
         "jev_configured": settings.jev_configured,
-        "phase": 2,
+        "phase": 3,
         "live_submit_client": "not_constructed",
     }

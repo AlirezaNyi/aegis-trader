@@ -76,6 +76,20 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("AEGIS_LOG_LEVEL", "log_level"),
     )
 
+    analyst_timeout_seconds: float = Field(
+        default=2.0,
+        validation_alias=AliasChoices(
+            "AEGIS_ANALYST_TIMEOUT_SECONDS", "analyst_timeout_seconds"
+        ),
+        gt=0,
+    )
+    analyst_concurrency: int = Field(
+        default=5,
+        validation_alias=AliasChoices("AEGIS_ANALYST_CONCURRENCY", "analyst_concurrency"),
+        ge=1,
+        le=5,
+    )
+
     # When False, readiness skips DB connectivity (unit tests).
     require_database: bool = Field(
         default=True,

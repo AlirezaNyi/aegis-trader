@@ -33,4 +33,4 @@ def test_ready_paper_without_db_requirement() -> None:
     assert body["trading_mode"] == "paper"
     assert body["live_execution_permitted"] is False
     assert body["live_submit_client"] == "not_constructed"
-    assert body["phase"] == 2
+    assert body["phase"] == 3
