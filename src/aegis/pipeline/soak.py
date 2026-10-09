@@ -12,7 +12,9 @@ from aegis.config.settings import Settings, TradingMode
 from aegis.interfaces.market_data import MarketDataPort
 from aegis.logging import get_logger
 from aegis.ops.shutdown import ShutdownGate
+from aegis.pipeline.activity import ActivityStage, ActivityState
 from aegis.pipeline.cycle import PaperCycleDeps, PaperCycleResult, run_paper_cycle
+from aegis.pipeline.journal import PaperCycleJournal, build_review_record
 from aegis.schemas.common import MarketType, Timeframe
 from aegis.schemas.market import Candle, InstrumentRef
 
@@ -51,6 +53,8 @@ class PaperSoakRunner:
     instruments: tuple[InstrumentRef, ...]
     timeframe: Timeframe
     candle_limit: int = 100
+    journal: PaperCycleJournal | None = None
+    activity: ActivityState | None = None
     _last_final_open: dict[str, datetime] = field(default_factory=dict, init=False)
     cycles_run: int = field(default=0, init=False)
     last_outcome: SoakPollOutcome | None = field(default=None, init=False)
@@ -59,6 +63,8 @@ class PaperSoakRunner:
         if not self.instruments:
             msg = "PaperSoakRunner requires at least one instrument"
             raise ValueError(msg)
+        if self.activity is None and self.deps.activity is not None:
+            self.activity = self.deps.activity
 
     @property
     def instrument(self) -> InstrumentRef:
@@ -68,6 +74,26 @@ class PaperSoakRunner:
     @property
     def symbols(self) -> list[str]:
         return [i.symbol for i in self.instruments]
+
+    def _set_activity(
+        self,
+        stage: ActivityStage,
+        *,
+        symbol: str | None = None,
+        detail: str | None = None,
+        final_open_time: datetime | None = None,
+        correlation_id: str | None = None,
+    ) -> None:
+        if self.activity is None:
+            return
+        self.activity.set(
+            stage,
+            symbol=symbol,
+            timeframe=self.timeframe.value,
+            final_open_time=final_open_time,
+            correlation_id=correlation_id,
+            detail=detail,
+        )
 
     async def poll_once(self, now: datetime | None = None) -> SoakPollOutcome:
         """Fetch candles for each symbol; run a cycle when a new final bar appears."""
@@ -117,6 +143,7 @@ class PaperSoakRunner:
         clock: datetime,
     ) -> SoakPollOutcome:
         symbol = instrument.symbol
+        self._set_activity(ActivityStage.FETCHING, symbol=symbol, detail="klines")
         try:
             raw = self.market_data.get_candles(
                 instrument,
@@ -151,6 +178,18 @@ class PaperSoakRunner:
             )
 
         newest = finals[-1]
+        # Always refresh open signal marks with the current candle window.
+        if self.journal is not None:
+            try:
+                self.journal.mark_open_with_candles(symbol=symbol, candles=candles)
+            except Exception as exc:  # noqa: BLE001 — never abort soak
+                logger.warning(
+                    "paper_journal_mark_failed symbol=%s err=%s",
+                    symbol,
+                    type(exc).__name__,
+                    extra={"event": "paper_journal_mark_failed", "component": "soak"},
+                )
+
         prev = self._last_final_open.get(symbol)
         if prev is not None and newest.open_time <= prev:
             return SoakPollOutcome(
@@ -169,6 +208,7 @@ class PaperSoakRunner:
         )
         self._last_final_open[symbol] = newest.open_time
         self.cycles_run += 1
+        self._record_cycle(result=result, instrument=instrument, entry_candle=newest)
         action = None if result.proposal is None else result.proposal.action.value
         logger.info(
             "paper_soak_cycle symbol=%s open=%s suggestion=%s decision=%s order=%s",
@@ -186,6 +226,54 @@ class PaperSoakRunner:
             symbol=symbol,
         )
 
+    def _record_cycle(
+        self,
+        *,
+        result: PaperCycleResult,
+        instrument: InstrumentRef,
+        entry_candle: Candle,
+    ) -> None:
+        if self.journal is None:
+            return
+        try:
+            # Lazy import avoids soak ↔ review cycle at module load.
+            from aegis.pipeline.review import summarize_paper_cycle
+
+            proposal = result.proposal
+            action = None if proposal is None else proposal.action.value
+            direction = (
+                None
+                if proposal is None or proposal.direction is None
+                else proposal.direction.value
+            )
+            risk = (
+                None
+                if result.decision is None
+                else result.decision.decision.value
+            )
+            order_id = None if result.order is None else str(result.order.order_id)
+            record = build_review_record(
+                correlation_id=result.correlation_id,
+                symbol=instrument.symbol,
+                timeframe=self.timeframe.value,
+                final_open_time=entry_candle.open_time,
+                summary=summarize_paper_cycle(result, detail=True),
+                proposal_action=action,
+                proposal_direction=direction,
+                risk_decision=risk,
+                entry_price=entry_candle.close,
+                stop_loss=None if proposal is None else proposal.stop_loss,
+                take_profit=None if proposal is None else proposal.take_profit,
+                paper_order_id=order_id,
+            )
+            self.journal.append(record)
+        except Exception as exc:  # noqa: BLE001 — fail open; cycle already finished
+            logger.warning(
+                "paper_journal_record_failed err=%s",
+                type(exc).__name__,
+                extra={"event": "paper_journal_record_failed", "component": "soak"},
+            )
+
 
 async def run_soak_loop(
     runner: PaperSoakRunner,
@@ -200,6 +288,10 @@ async def run_soak_loop(
         await runner.poll_once()
         if shutdown.shutting_down:
             break
+        runner._set_activity(  # noqa: SLF001 — intentional stage for operator UI
+            ActivityStage.SLEEPING,
+            detail=f"waiting_{poll_seconds}s",
+        )
         await sleeper(poll_seconds)
 
 

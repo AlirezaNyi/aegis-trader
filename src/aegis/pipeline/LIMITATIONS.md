@@ -37,7 +37,19 @@ Soak uses public REST only (no trade keys).
 
 * CLI: `scripts/paper_soak.py --once` prints SUGGESTION / RISK / PAPER_ORDER / HINT.
 * HTTP (when soak is running in-app): `GET /ops/paper/last-cycle` — last soak outcome only; paper simulation; no live submit.
+* Operator dashboard (read-only): `GET /` HTML + `GET /ops/dashboard` JSON — activity stage,
+  review history, BUY/SELL percent marks, paper cash equity. No live/order controls.
 * `NO_TRADE` + Risk `REJECT`/`RP-ACTION` is expected when the bot declines a trade.
+
+## Dashboard / signal marks
+
+* BUY/SELL hypothetical return is **percent only** (entry = final bar close). Dollar PnL is
+  paper ledger equity vs session initial only.
+* Same-bar SL and TP → stop wins. HOLD / NO_TRADE are not in the percent aggregate.
+* Marks use the current soak candle window (default max 100). If the process was down across
+  bars, a stop inside the gap is not observed; the last stored mark remains.
+* Journal Postgres writes fail open: memory still serves the UI; `persist_warning` is set.
+* Analyst / Jev labels remain descriptive — not order signals.
 
 ## Deferred
 
@@ -45,3 +57,4 @@ Soak uses public REST only (no trade keys).
 * Exchange inventory reconcile remains out of scope (audit M1).
 * Intent mapping requires `entry_price` + `sizing.notional` on APPROVE.
 * SE-* paper evaluation thresholds remain UNAPPROVED (soak is learning, not promotion).
+* Candle table persistence for full counterfactual history across restarts.

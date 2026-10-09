@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Aegis — داشبورد کاغذی</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a2332;
+      --border: #2d3a4f;
+      --text: #e7ecf3;
+      --muted: #8b9bb4;
+      --accent: #3d8bfd;
+      --good: #3dd68c;
+      --bad: #f07178;
+      --warn: #e6b450;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Vazirmatn", "Tahoma", "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    header {
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      align-items: baseline;
+      justify-content: space-between;
+    }
+    h1 { font-size: 1.15rem; margin: 0; font-weight: 600; }
+    .meta { color: var(--muted); font-size: 0.85rem; }
+    main {
+      display: grid;
+      gap: 1rem;
+      padding: 1rem;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem;
+    }
+    .panel h2 {
+      margin: 0 0 0.75rem;
+      font-size: 0.95rem;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .wide { grid-column: 1 / -1; }
+    .stage {
+      font-size: 1.4rem;
+      font-weight: 700;
+      color: var(--accent);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .kv { display: grid; gap: 0.35rem; font-size: 0.9rem; }
+    .kv div { display: flex; justify-content: space-between; gap: 1rem; }
+    .kv span:last-child {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: var(--text);
+      text-align: left;
+      direction: ltr;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.82rem;
+    }
+    th, td {
+      border-bottom: 1px solid var(--border);
+      padding: 0.45rem 0.35rem;
+      text-align: right;
+      vertical-align: top;
+    }
+    th { color: var(--muted); font-weight: 600; }
+    td.ltr, th.ltr { direction: ltr; text-align: left; }
+    .pos { color: var(--good); }
+    .neg { color: var(--bad); }
+    .pill {
+      display: inline-block;
+      padding: 0.1rem 0.45rem;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      font-size: 0.75rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .warn { color: var(--warn); font-size: 0.85rem; margin-top: 0.5rem; }
+    .note { color: var(--muted); font-size: 0.8rem; margin-top: 0.75rem; }
+    ul.limits { margin: 0.5rem 0 0; padding-inline-start: 1.2rem; color: var(--muted); font-size: 0.8rem; }
+    pre.block {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 0.78rem;
+      direction: ltr;
+      text-align: left;
+      max-height: 220px;
+      overflow: auto;
+      background: #121821;
+      padding: 0.6rem;
+      border-radius: 6px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>داشبورد اپراتور کاغذی Aegis</h1>
+      <div class="meta">فقط مشاهده — بدون کنترل سفارش یا live</div>
+    </div>
+    <div class="meta" id="header-meta">در حال بارگذاری…</div>
+  </header>
+  <main>
+    <section class="panel">
+      <h2>الان چه می‌کند</h2>
+      <div class="stage" id="stage">—</div>
+      <div class="kv" id="activity-kv"></div>
+    </section>
+    <section class="panel">
+      <h2>حساب کاغذی (دلار)</h2>
+      <div class="kv" id="paper-kv"></div>
+      <div class="note">سود/ضرر دلاری فقط برای معاملات کاغذی واقعی است.</div>
+    </section>
+    <section class="panel">
+      <h2>جمع سیگنال‌های BUY / SELL (%)</h2>
+      <div class="kv" id="agg-kv"></div>
+      <div class="note" id="agg-disclaimer"></div>
+    </section>
+    <section class="panel wide">
+      <h2>آخرین بررسی</h2>
+      <div id="last-cycle"></div>
+    </section>
+    <section class="panel wide">
+      <h2>سیگنال‌ها (فقط BUY / SELL)</h2>
+      <div style="overflow-x:auto">
+        <table>
+          <thead>
+            <tr>
+              <th>زمان</th>
+              <th class="ltr">Symbol</th>
+              <th class="ltr">Action</th>
+              <th class="ltr">Risk</th>
+              <th class="ltr">Status</th>
+              <th class="ltr">Return %</th>
+            </tr>
+          </thead>
+          <tbody id="signals-body"></tbody>
+        </table>
+      </div>
+    </section>
+    <section class="panel wide">
+      <h2>تاریخچه بررسی‌ها</h2>
+      <div style="overflow-x:auto">
+        <table>
+          <thead>
+            <tr>
+              <th>زمان</th>
+              <th class="ltr">Symbol</th>
+              <th class="ltr">Action</th>
+              <th class="ltr">Risk</th>
+              <th>راهنما</th>
+            </tr>
+          </thead>
+          <tbody id="reviews-body"></tbody>
+        </table>
+      </div>
+      <ul class="limits" id="limits"></ul>
+      <div class="warn" id="persist-warn" hidden></div>
+    </section>
+  </main>
+  <script>
+    const STAGE_FA = {
+      idle: "بیکار",
+      fetching: "دریافت کندل",
+      validating: "اعتبارسنجی",
+      features: "ویژگی‌ها",
+      analysts: "تحلیلگرها",
+      evidence: "بستهٔ شواهد",
+      jev: "Jev",
+      supervisor: "Supervisor",
+      risk: "Risk Engine",
+      paper: "PaperBroker",
+      sleeping: "در انتظار کندل بعدی",
+    };
+
+    function esc(s) {
+      return String(s ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+    }
+
+    function pctClass(v) {
+      const n = Number(v);
+      if (Number.isNaN(n) || n === 0) return "";
+      return n > 0 ? "pos" : "neg";
+    }
+
+    function kv(el, rows) {
+      el.innerHTML = rows
+        .map(([k, v]) => `<div><span>${esc(k)}</span><span class="ltr">${esc(v)}</span></div>`)
+        .join("");
+    }
+
+    function render(data) {
+      document.getElementById("header-meta").textContent =
+        `mode=${data.mode} · soak=${data.soak_running ? "on" : "off"} · cycles=${data.cycles_run} · ${data.symbols?.join(",") || "—"} · ${data.timeframe || "—"}`;
+
+      const act = data.activity || {};
+      document.getElementById("stage").textContent =
+        `${STAGE_FA[act.stage] || act.stage || "—"} (${act.stage || "—"})`;
+      kv(document.getElementById("activity-kv"), [
+        ["نماد", act.symbol || "—"],
+        ["تایم‌فریم", act.timeframe || "—"],
+        ["کندل", act.final_open_time || "—"],
+        ["correlation", act.correlation_id || "—"],
+        ["جزئیات", act.detail || "—"],
+        ["به‌روز", act.updated_at || "—"],
+      ]);
+
+      const pa = data.paper_account || {};
+      kv(document.getElementById("paper-kv"), [
+        ["موجودی نقد", pa.cash ?? "—"],
+        ["equity", pa.equity ?? "—"],
+        ["ابتدای session", pa.initial_equity ?? "—"],
+        ["PnL $", pa.pnl_dollar ?? "—"],
+        ["پوزیشن‌ها", (pa.positions || []).length],
+      ]);
+
+      const agg = data.signal_aggregate || {};
+      kv(document.getElementById("agg-kv"), [
+        ["تعداد", agg.count],
+        ["برد", agg.wins],
+        ["باخت", agg.losses],
+        ["باز", agg.open],
+        ["میانگین %", agg.mean_return_pct],
+        ["جمع %", agg.sum_return_pct],
+      ]);
+      document.getElementById("agg-disclaimer").textContent = agg.disclaimer || "";
+
+      const last = data.last_cycle;
+      const lastEl = document.getElementById("last-cycle");
+      if (!last) {
+        lastEl.innerHTML = `<div class="note">هنوز بررسی‌ای ثبت نشده.</div>`;
+      } else {
+        const cycle = last.cycle || {};
+        const prop = cycle.proposal || {};
+        const risk = cycle.risk || {};
+        const analysts = cycle.analysts || [];
+        const jev = cycle.jev;
+        lastEl.innerHTML = `
+          <div class="kv" style="margin-bottom:0.75rem">
+            <div><span>ran_cycle</span><span class="ltr">${esc(last.ran_cycle)}</span></div>
+            <div><span>skipped</span><span class="ltr">${esc(last.skipped_reason || "—")}</span></div>
+            <div><span>SUGGESTION</span><span class="ltr"><span class="pill">${esc(prop.action || "—")}</span> ${esc(prop.direction || "")}</span></div>
+            <div><span>RISK</span><span class="ltr"><span class="pill">${esc(risk.decision || "—")}</span></span></div>
+            <div><span>HINT</span><span>${esc(cycle.owner_hint || "—")}</span></div>
+          </div>
+          <div class="note">تحلیلگرها (توصیفی — نه سفارش):</div>
+          <pre class="block">${esc(JSON.stringify(analysts, null, 2))}</pre>
+          <div class="note" style="margin-top:0.5rem">Jev:</div>
+          <pre class="block">${esc(JSON.stringify(jev, null, 2))}</pre>
+        `;
+      }
+
+      const sigBody = document.getElementById("signals-body");
+      const signals = data.signals || [];
+      sigBody.innerHTML = signals.length
+        ? signals
+            .map((s) => {
+              const cls = pctClass(s.return_pct);
+              return `<tr>
+                <td class="ltr">${esc(s.final_open_time || s.created_at || "")}</td>
+                <td class="ltr">${esc(s.symbol)}</td>
+                <td class="ltr">${esc(s.proposal_action)}</td>
+                <td class="ltr">${esc(s.risk_decision || "—")}</td>
+                <td class="ltr">${esc(s.mark_status || "—")}</td>
+                <td class="ltr ${cls}">${esc(s.return_pct ?? "—")}</td>
+              </tr>`;
+            })
+            .join("")
+        : `<tr><td colspan="6" class="note">هنوز سیگنال BUY/SELL نیست.</td></tr>`;
+
+      const revBody = document.getElementById("reviews-body");
+      const reviews = data.reviews || [];
+      revBody.innerHTML = reviews.length
+        ? reviews
+            .map((r) => {
+              const hint = (r.summary && r.summary.owner_hint) || "—";
+              return `<tr>
+                <td class="ltr">${esc(r.final_open_time || r.created_at || "")}</td>
+                <td class="ltr">${esc(r.symbol)}</td>
+                <td class="ltr">${esc(r.proposal_action || "—")}</td>
+                <td class="ltr">${esc(r.risk_decision || "—")}</td>
+                <td>${esc(hint)}</td>
+              </tr>`;
+            })
+            .join("")
+        : `<tr><td colspan="5" class="note">تاریخچه خالی است.</td></tr>`;
+
+      document.getElementById("limits").innerHTML = (data.limitations || [])
+        .map((x) => `<li>${esc(x)}</li>`)
+        .join("");
+
+      const warn = document.getElementById("persist-warn");
+      if (data.persist_warning) {
+        warn.hidden = false;
+        warn.textContent = `هشدار ذخیرهٔ Postgres: ${data.persist_warning} — داده در حافظه نگه داشته می‌شود.`;
+      } else {
+        warn.hidden = true;
+      }
+    }
+
+    async function tick() {
+      try {
+        const res = await fetch("/ops/dashboard", { cache: "no-store" });
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        render(await res.json());
+      } catch (e) {
+        document.getElementById("header-meta").textContent = "خطا در دریافت داده: " + e;
+      }
+    }
+
+    tick();
+    setInterval(tick, 2000);
+  </script>
+</body>
+</html>

@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from aegis import __version__
+from aegis.api.dashboard import router as dashboard_router
 from aegis.api.health import router as health_router
 from aegis.api.metrics import router as metrics_router
 from aegis.api.middleware import CorrelationIdMiddleware
@@ -29,7 +30,9 @@ from aegis.ops.shutdown import ShutdownGate
 from aegis.orders.manager import OrderManager
 from aegis.paper.broker import PaperBroker
 from aegis.paper.ledger import PaperLedger
+from aegis.pipeline.activity import ActivityState
 from aegis.pipeline.cycle import PaperCycleDeps, run_paper_cycle
+from aegis.pipeline.journal import PaperCycleJournal
 from aegis.pipeline.soak import (
     PaperSoakRunner,
     run_soak_loop,
@@ -86,6 +89,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     deps=_app.state.paper_cycle_deps,
                     instruments=instruments,
                     timeframe=soak_timeframe_from_settings(resolved),
+                    journal=_app.state.paper_journal,
+                    activity=_app.state.activity,
                 )
                 _app.state.paper_soak_runner = runner
                 soak_task = asyncio.create_task(
@@ -161,6 +166,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         execution=null_execution,
         reconciler=reconciler,
     )
+    # Operator dashboard state — activity is in-memory; journal uses real DB URL
+    # (never store full Settings on app.state; URL is journal-only).
+    activity = ActivityState()
+    app.state.activity = activity
+    app.state.paper_journal = PaperCycleJournal(database_url=resolved.database_url)
     # Paper decision cycle deps — callable on finalized candles only.
     paper_cycle_deps = PaperCycleDeps(
         settings=safe_settings,
@@ -170,10 +180,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         supervisor_budgets=app.state.supervisor_budgets,
         paper_broker=paper_broker,
         analyst_concurrency=resolved.analyst_concurrency,
+        activity=activity,
     )
     app.state.paper_cycle_deps = paper_cycle_deps
     app.state.run_paper_cycle = run_paper_cycle
     app.state.paper_soak_runner = None
+    app.include_router(dashboard_router)
     app.include_router(health_router)
     app.include_router(metrics_router)
     return app

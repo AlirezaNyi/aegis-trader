@@ -8,7 +8,11 @@ from aegis.pipeline.cycle import PaperCycleResult
 from aegis.pipeline.soak import SoakPollOutcome
 
 
-def summarize_paper_cycle(result: PaperCycleResult) -> dict[str, Any]:
+def summarize_paper_cycle(
+    result: PaperCycleResult,
+    *,
+    detail: bool = False,
+) -> dict[str, Any]:
     """Build a review payload for owner inspection of bot suggestions."""
     proposal = result.proposal
     decision = result.decision
@@ -17,7 +21,11 @@ def summarize_paper_cycle(result: PaperCycleResult) -> dict[str, Any]:
     proposal_block: dict[str, Any] | None = None
     if proposal is not None:
         direction = None if proposal.direction is None else proposal.direction.value
-        action = proposal.action.value if hasattr(proposal.action, "value") else str(proposal.action)
+        action = (
+            proposal.action.value
+            if hasattr(proposal.action, "value")
+            else str(proposal.action)
+        )
         proposal_block = {
             "action": action,
             "direction": direction,
@@ -66,7 +74,7 @@ def summarize_paper_cycle(result: PaperCycleResult) -> dict[str, Any]:
             ),
         }
 
-    return {
+    body: dict[str, Any] = {
         "correlation_id": result.correlation_id,
         "validation_ok": result.validation.ok,
         "validation_block_reasons": list(result.validation.block_reasons),
@@ -75,6 +83,61 @@ def summarize_paper_cycle(result: PaperCycleResult) -> dict[str, Any]:
         "paper_order": order_block,
         "blocked_reason": result.blocked_reason,
         "owner_hint": _owner_hint(result),
+    }
+    if detail:
+        body["analysts"] = _summarize_analysts(proposal)
+        body["jev"] = _summarize_jev(proposal)
+    return body
+
+
+def _summarize_analysts(proposal: Any) -> list[dict[str, Any]]:
+    if proposal is None:
+        return []
+    rows: list[dict[str, Any]] = []
+    for ev in list(getattr(proposal, "analyst_results", []) or []):
+        payload = dict(getattr(ev, "payload", {}) or {})
+        # Keep descriptive labels only; drop bulky series if present.
+        compact = {
+            k: v
+            for k, v in payload.items()
+            if k.lower() not in {"api_key", "authorization", "secret"}
+            and not isinstance(v, list)
+        }
+        rows.append(
+            {
+                "analyst_type": (
+                    ev.analyst_type.value
+                    if hasattr(ev.analyst_type, "value")
+                    else str(ev.analyst_type)
+                ),
+                "status": (
+                    ev.status.value if hasattr(ev.status, "value") else str(ev.status)
+                ),
+                "notes": getattr(ev, "notes", None),
+                "payload": compact,
+                "not_an_order_signal": True,
+            }
+        )
+    return rows
+
+
+def _summarize_jev(proposal: Any) -> dict[str, Any] | None:
+    if proposal is None:
+        return None
+    jev = getattr(proposal, "jev_result", None)
+    if jev is None:
+        return None
+    answers = dict(getattr(jev, "answers", {}) or {})
+    return {
+        "status": jev.status.value if hasattr(jev.status, "value") else str(jev.status),
+        "answers": {
+            k: v
+            for k, v in answers.items()
+            if k.lower() not in {"api_key", "authorization", "secret"}
+        },
+        "confidence_notes": getattr(jev, "confidence_notes", None),
+        "latency_ms": getattr(jev, "latency_ms", None),
+        "model": getattr(jev, "model", None),
     }
 
 

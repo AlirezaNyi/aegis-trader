@@ -1,4 +1,4 @@
-"""SQLAlchemy models (Phase 1–6: audit through paper/backtest ledger rows)."""
+"""SQLAlchemy models (Phase 1–6 + paper cycle review journal)."""
 
 from __future__ import annotations
 
@@ -265,6 +265,41 @@ class PaperBalanceRow(Base):
     asset: Mapped[str] = mapped_column(String(32), nullable=False)
     balance: Mapped[str] = mapped_column(String(64), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class PaperCycleReviewRow(Base):
+    """Operator journal of paper soak cycles + hypothetical BUY/SELL marks."""
+
+    __tablename__ = "paper_cycle_reviews"
+
+    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    correlation_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(8), nullable=False)
+    final_open_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    proposal_action: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    proposal_direction: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    risk_decision: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    entry_price: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    stop_loss: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    take_profit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    mark_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    return_pct: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    exit_price: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    paper_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    summary: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
 
 
 class BacktestRunRow(Base):

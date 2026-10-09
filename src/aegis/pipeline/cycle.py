@@ -23,6 +23,7 @@ from aegis.paper.equity import (
     instrument_mark_key,
 )
 from aegis.paper.exceptions import PaperBrokerError
+from aegis.pipeline.activity import ActivityStage, ActivityState
 from aegis.pipeline.context import build_paper_risk_context
 from aegis.pipeline.intent import IntentBuildError, intent_from_approved
 from aegis.risk.engine import evaluate_risk
@@ -54,6 +55,29 @@ class PaperCycleDeps:
     strategy_version: str = "0.1.0"
     equity_tracker: PaperEquityTracker = field(default_factory=PaperEquityTracker)
     proposal_history: ProposalHistory = field(default_factory=ProposalHistory)
+    activity: ActivityState | None = None
+
+
+def _notify_activity(
+    deps: PaperCycleDeps,
+    stage: ActivityStage,
+    *,
+    instrument: InstrumentRef | None = None,
+    timeframe: Timeframe | None = None,
+    final_open_time: datetime | None = None,
+    correlation_id: str | None = None,
+    detail: str | None = None,
+) -> None:
+    if deps.activity is None:
+        return
+    deps.activity.set(
+        stage,
+        symbol=None if instrument is None else instrument.symbol,
+        timeframe=None if timeframe is None else timeframe.value,
+        final_open_time=final_open_time,
+        correlation_id=correlation_id,
+        detail=detail,
+    )
 
 
 @dataclass(frozen=True)
@@ -170,6 +194,16 @@ async def run_paper_cycle(
     if clock.tzinfo is None:
         clock = clock.replace(tzinfo=UTC)
     corr = correlation_id or f"paper-cycle-{uuid4().hex[:12]}"
+    finals = [c for c in candles if c.is_final]
+    bar_open = finals[-1].open_time if finals else None
+    _notify_activity(
+        deps,
+        ActivityStage.VALIDATING,
+        instrument=instrument,
+        timeframe=timeframe,
+        final_open_time=bar_open,
+        correlation_id=corr,
+    )
 
     if deps.settings.trading_mode == TradingMode.LIVE:
         empty = ValidationResult(
@@ -255,6 +289,14 @@ async def run_paper_cycle(
         )
 
     as_of = validation.candles[-1].close_time
+    _notify_activity(
+        deps,
+        ActivityStage.FEATURES,
+        instrument=instrument,
+        timeframe=timeframe,
+        final_open_time=validation.candles[-1].open_time,
+        correlation_id=corr,
+    )
     snapshot = compute_features(
         validation.candles,
         instrument=instrument,
@@ -263,6 +305,13 @@ async def run_paper_cycle(
         include_intrabar=False,
         created_at=clock,
     )
+    _notify_activity(
+        deps,
+        ActivityStage.ANALYSTS,
+        instrument=instrument,
+        timeframe=timeframe,
+        correlation_id=corr,
+    )
     analyst_evidence = await run_analysts(
         snapshot,
         validation.candles,
@@ -270,13 +319,34 @@ async def run_paper_cycle(
         concurrency=deps.analyst_concurrency,
         timeout_seconds=2.0,
     )
+    _notify_activity(
+        deps,
+        ActivityStage.EVIDENCE,
+        instrument=instrument,
+        timeframe=timeframe,
+        correlation_id=corr,
+    )
     package = build_evidence_package(
         snapshot,
         analyst_evidence,
         correlation_id=corr,
         created_at=clock,
     )
+    _notify_activity(
+        deps,
+        ActivityStage.JEV,
+        instrument=instrument,
+        timeframe=timeframe,
+        correlation_id=corr,
+    )
     jev_result = deps.jev_port.evaluate(package)
+    _notify_activity(
+        deps,
+        ActivityStage.SUPERVISOR,
+        instrument=instrument,
+        timeframe=timeframe,
+        correlation_id=corr,
+    )
     proposal = supervise(
         package,
         jev_result,
@@ -287,6 +357,14 @@ async def run_paper_cycle(
         clock=lambda: clock,
     )
     mark = validation.candles[-1].close
+    _notify_activity(
+        deps,
+        ActivityStage.RISK,
+        instrument=instrument,
+        timeframe=timeframe,
+        correlation_id=corr,
+        detail=proposal.action.value,
+    )
     context = build_paper_risk_context(
         now=clock,
         validation=validation,
@@ -311,6 +389,13 @@ async def run_paper_cycle(
     order: Order | None = None
     fill_blocked: str | None = None
     if may_submit_to_order_manager(decision, now=clock):
+        _notify_activity(
+            deps,
+            ActivityStage.PAPER,
+            instrument=instrument,
+            timeframe=timeframe,
+            correlation_id=corr,
+        )
         try:
             intent = intent_from_approved(decision, proposal, now=clock)
             order = deps.paper_broker.submit_from_risk_decision(
