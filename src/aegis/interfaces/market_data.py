@@ -1,4 +1,4 @@
-"""Market data port — no network implementation in Phase 1."""
+"""Market data port — Toobit adapters live under aegis.market_data."""
 
 from __future__ import annotations
 
@@ -17,14 +17,14 @@ class MarketDataPort(Protocol):
         *,
         limit: int = 100,
     ) -> Sequence[Candle]:
-        """Return candles from a verified source (Phase 2+)."""
+        """Return candles from a verified source."""
 
     def stream_events(self) -> Sequence[NormalizedMarketEvent]:
-        """Return buffered market events (Phase 2+)."""
+        """Return buffered market events."""
 
 
 class NullMarketDataPort:
-    """Stub that refuses fabricated exchange data."""
+    """Stub that refuses to invent exchange data when no adapter is configured."""
 
     def get_candles(
         self,
@@ -34,9 +34,9 @@ class NullMarketDataPort:
         limit: int = 100,
     ) -> Sequence[Candle]:
         raise NotImplementedError(
-            "Market data client is not implemented in Phase 1. "
+            "No market-data adapter configured. "
             f"Requested {instrument.symbol} {interval.value} limit={limit}."
         )
 
     def stream_events(self) -> Sequence[NormalizedMarketEvent]:
-        raise NotImplementedError("Market data streaming is not implemented in Phase 1.")
+        raise NotImplementedError("No market-data adapter configured.")

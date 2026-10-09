@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -9,6 +10,7 @@ from fastapi import APIRouter, Request
 from aegis.config.settings import Settings
 from aegis.db.session import check_database
 from aegis.guards.live import live_execution_permitted, trading_ready
+from aegis.market_data.metrics import MarketDataMetrics
 
 router = APIRouter(tags=["health"])
 
@@ -29,6 +31,13 @@ def ready(request: Request) -> dict[str, Any]:
     mode_ready = trading_ready(settings)
     ready_flag = db_ok and (settings.is_paper_or_dev or mode_ready)
 
+    metrics: MarketDataMetrics | None = getattr(request.app.state, "market_data_metrics", None)
+    market_data: dict[str, object]
+    if metrics is None:
+        market_data = {"configured": False}
+    else:
+        market_data = {"configured": True, **metrics.snapshot(datetime.now(UTC))}
+
     return {
         "ready": ready_flag,
         "service": "aegis",
@@ -38,7 +47,8 @@ def ready(request: Request) -> dict[str, Any]:
         "trading_ready": mode_ready,
         "live_execution_permitted": live_execution_permitted(settings),
         "database": {"ok": db_ok, "detail": db_detail},
+        "market_data": market_data,
         "jev_configured": settings.jev_configured,
-        "phase": 1,
+        "phase": 2,
         "live_submit_client": "not_constructed",
     }

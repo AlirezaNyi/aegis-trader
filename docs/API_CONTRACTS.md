@@ -2,7 +2,7 @@
 
 **Version:** 1.0
 **Status:** Proposed (Phase 0)
-**Verification date:** 2026-10-09
+**Verification date:** 2026-10-09 (Phase 2 market-data re-check on same date)
 **Method:** Read official documentation only; no live API calls, no credentials used
 
 Sources:

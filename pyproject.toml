@@ -13,6 +13,8 @@ authors = [{ name = "Aegis Owner" }]
 dependencies = [
   "fastapi>=0.115.0",
   "uvicorn[standard]>=0.32.0",
+  "httpx>=0.28.0",
+  "websockets>=13.0",
   "pydantic>=2.9.0",
   "pydantic-settings>=2.6.0",
   "sqlalchemy>=2.0.36",
@@ -23,10 +25,17 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest>=8.3.0",
+  "pytest-asyncio>=0.24.0",
   "httpx>=0.28.0",
   "ruff>=0.8.0",
   "mypy>=1.13.0",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 
 [project.scripts]
 aegis = "aegis.main:run"
@@ -36,10 +45,6 @@ packages = ["src/aegis"]
 
 [tool.hatch.build.targets.sdist]
 include = ["src/aegis", "alembic", "alembic.ini", "README.md"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["src"]
 
 [tool.ruff]
 target-version = "py312"

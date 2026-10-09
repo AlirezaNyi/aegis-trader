@@ -3,6 +3,7 @@
 from aegis.schemas.common import EvidenceStatus, LedgerKind, MarketType, Timeframe
 from aegis.schemas.evidence import AnalystEvidence, AnalystType, EvidencePackage, JevResult
 from aegis.schemas.market import Candle, InstrumentRef, NormalizedMarketEvent
+from aegis.schemas.metadata import SymbolMetadata
 from aegis.schemas.orders import Fill, Order, OrderIntent, OrderStatus, Position
 from aegis.schemas.proposal import ProposalAction, TradeDirection, TradeProposal
 from aegis.schemas.risk import RiskDecision, RiskDecisionType
@@ -26,6 +27,7 @@ __all__ = [
     "ProposalAction",
     "RiskDecision",
     "RiskDecisionType",
+    "SymbolMetadata",
     "Timeframe",
     "TradeDirection",
     "TradeProposal",
