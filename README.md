@@ -4,6 +4,8 @@ Personal autonomous trading system for Toobit Spot and Futures. **Paper trading 
 
 Package and service identity: `aegis`.
 
+Repository: [AlirezaNyi/aegis-trader](https://github.com/AlirezaNyi/aegis-trader)
+
 Product and architecture docs live under [`docs/`](docs/). Phase guides live under [`Phases/`](Phases/).
 
 ## Requirements
