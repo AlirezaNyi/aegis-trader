@@ -1,0 +1,41 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: aegis
+      POSTGRES_PASSWORD: aegis
+      POSTGRES_DB: aegis
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aegis -d aegis"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # Not published publicly by default — local only
+    ports:
+      - "5432:5432"
+
+  aegis:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      AEGIS_TRADING_MODE: paper
+      AEGIS_LIVE_ARMED: "false"
+      AEGIS_KILL_SWITCH: "false"
+      AEGIS_REQUIRE_DATABASE: "true"
+      DATABASE_URL: postgresql+psycopg://aegis:aegis@postgres:5432/aegis
+      AEGIS_LOG_LEVEL: INFO
+      TOOBIT_API_KEY: ""
+      TOOBIT_API_SECRET: ""
+      TYPESAFE_API_KEY: ""
+    ports:
+      - "8000:8000"
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn aegis.main:app --host 0.0.0.0 --port 8000"
+
+volumes:
+  postgres_data:
