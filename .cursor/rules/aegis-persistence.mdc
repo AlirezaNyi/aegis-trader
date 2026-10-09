@@ -1,0 +1,26 @@
+---
+description: Alembic and SQLAlchemy persistence constraints for Aegis
+globs: alembic/**/*.py,src/aegis/db/**/*.py
+alwaysApply: false
+---
+
+# Aegis persistence
+
+System of record: PostgreSQL. Redis is deferred (ADR 0003). Schema changes require Alembic migrations; no silent auto-alter in production.
+
+## Migrations
+
+- Add new revision files under `alembic/versions/`; do not edit an already-applied revision.
+- Prefer `alembic upgrade head` for local and Compose startup paths.
+- Do not run `alembic downgrade` unless the owner explicitly requests it.
+
+## Models
+
+- Keep `audit_events` append-only.
+- When order/position tables exist, separate paper and live state with `ledger_kind` (or equivalent discriminator).
+- Do not store API secrets, signatures, or raw credential material in columns or JSONB.
+- Prefer correlation IDs on decision artifacts for end-to-end traces.
+
+## Data model reference
+
+Entity intent and rules: `docs/DATA_MODEL.md`.

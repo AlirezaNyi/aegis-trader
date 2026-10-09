@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeReadFile": [
+      {
+        "command": "python3 .cursor/hooks/guard_secret_reads.py",
+        "failClosed": true
+      }
+    ],
+    "beforeShellExecution": [
+      {
+        "command": "python3 .cursor/hooks/guard_trading_shell.py",
+        "failClosed": true
+      }
+    ]
+  }
+}

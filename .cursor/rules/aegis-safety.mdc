@@ -1,0 +1,42 @@
+---
+description: Aegis trading-system safety and trust-boundary constraints
+alwaysApply: true
+---
+
+# Aegis safety
+
+Paper trading is the default. Live trading stays disabled until the owner explicitly approves it.
+
+## Live gates
+
+Live order submission requires all of:
+
+- `AEGIS_TRADING_MODE=live`
+- `AEGIS_LIVE_ARMED=true`
+- `AEGIS_KILL_SWITCH=false`
+
+Do not weaken startup validation in `src/aegis/config/settings.py` or gates in `src/aegis/guards/live.py`. Models must never write these flags.
+
+## Credential plane
+
+Toobit API secrets may exist only in the exchange adapter / secret injection path. Analysts, Jev, and the LLM Supervisor must never receive exchange credentials, signing material, or execution tools.
+
+Never call `POST /api/v1/account/withdraw` or any withdrawal endpoint.
+
+## Honest external integrations
+
+Do not invent Toobit or TypeSafe Jev endpoints, fields, or behaviors. Prefer verified facts in `docs/API_CONTRACTS.md`. Unverified behavior stays behind an interface and is documented in the module `LIMITATIONS.md`.
+
+Do not invent numeric risk-policy values (leverage, size, loss, drawdown). See `docs/RISK_POLICY.md` — unapproved parameters block live enforcement.
+
+## Forbidden patterns
+
+- LangGraph or similar agent tool loops that can grant models execution tools (ADR 0002)
+- Toobit Agent Trade Kit or other AI-facing order bridges (ADR 0007)
+- Blind retry of timed-out or HTTP 5xx order submits (reconcile first)
+- Mixing paper and live ledgers
+- Reading or printing secrets from `.env`, `.env.local`, private keys, or credential files (use `.env.example` only)
+
+## Authority
+
+The deterministic Risk Engine is the only authority that may APPROVE a new trade. Prefer `NO_TRADE` / REJECT when critical evidence or state is missing, stale, or inconsistent.

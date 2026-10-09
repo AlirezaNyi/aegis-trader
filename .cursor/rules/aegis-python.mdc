@@ -1,0 +1,29 @@
+---
+description: Python package conventions for Aegis src and tests
+globs: src/**/*.py,tests/**/*.py
+alwaysApply: false
+---
+
+# Aegis Python
+
+Package lives under `src/aegis`. Python 3.12+. Tooling: pytest, Ruff, mypy (strict).
+
+## Style
+
+- Start modules with `from __future__ import annotations`.
+- Use Pydantic v2 models for public contracts (`aegis.schemas`).
+- Use `Decimal` for prices, sizes, notional, and similar financial quantities — not float.
+- Prefer typed protocols under `aegis.interfaces` over inventing concrete provider clients early.
+- Keep dependencies minimal; do not add frameworks without a clear need and parent approval.
+
+## Async and tests
+
+- pytest-asyncio mode is `auto` (`pyproject.toml`).
+- Prefer deterministic fixtures and mocks; never place real exchange orders in tests.
+- After substantive edits, run the smallest relevant pytest set; when types or public signatures change, also run `ruff check src tests` and `mypy src`.
+
+## Structure
+
+- Do not invent alternate package names; identity is `aegis`.
+- Keep analysis code free of Toobit secrets and order submission.
+- Document module gaps in `LIMITATIONS.md` rather than silently assuming exchange behavior.
