@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from uuid import UUID
 
+from aegis.paper.equity import (
+    PaperEquityTracker,
+    ProposalHistory,
+    compute_paper_equity,
+    instrument_mark_key,
+)
 from aegis.paper.ledger import PaperLedger
 from aegis.risk.context import RiskContext
 from aegis.schemas.market import InstrumentRef
@@ -20,12 +27,20 @@ def build_paper_risk_context(
     instrument: InstrumentRef,
     proposal: TradeProposal | None,
     proposed_notional: Decimal | None = None,
+    mark_price: Decimal | None = None,
+    equity_tracker: PaperEquityTracker | None = None,
+    proposal_history: ProposalHistory | None = None,
+    daily_loss_limit: Decimal | None = None,
     spread: Decimal = Decimal("0"),
     slippage_model_bps: Decimal = Decimal("5"),
     fee_estimate: Decimal = Decimal("5"),
 ) -> RiskContext:
-    """Honest paper RiskContext — missing critical fields stay None ⇒ Risk REJECT."""
-    open_positions = len(ledger.positions)
+    """Honest paper RiskContext — missing critical fields stay None ⇒ Risk REJECT.
+
+    Equity / daily_loss / drawdown come from ``PaperEquityTracker`` when provided.
+    Reconcile OK flags are paper-local simulation assumptions, not exchange inventory.
+    """
+    open_positions = len([p for p in ledger.positions.values() if p.quantity != 0])
     aggregate = Decimal("0")
     instrument_notional = Decimal("0")
     for pos in ledger.positions.values():
@@ -45,6 +60,20 @@ def build_paper_risk_context(
         if raw is not None:
             proposed = Decimal(str(raw))
 
+    marks: dict[str, Decimal] = {}
+    if mark_price is not None:
+        marks[instrument_mark_key(instrument)] = mark_price
+    equity = compute_paper_equity(ledger, marks=marks or None)
+
+    tracker = equity_tracker or PaperEquityTracker()
+    snap = tracker.observe(equity, now=now, daily_loss_limit=daily_loss_limit)
+
+    history = proposal_history or ProposalHistory()
+    recent: list[UUID] = history.recent_ids
+    duplicate = False
+    if proposal is not None:
+        duplicate = history.is_duplicate(proposal.proposal_id)
+
     return RiskContext(
         now=now,
         market_data_age_ms=validation.market_data_age_ms,
@@ -56,8 +85,8 @@ def build_paper_risk_context(
         aggregate_notional=aggregate,
         instrument_notional=instrument_notional,
         proposed_notional=proposed,
-        daily_loss=Decimal("0"),
-        drawdown=Decimal("0"),
+        daily_loss=snap.daily_loss,
+        drawdown=snap.drawdown,
         spread=spread,
         liquidity_ok=True,
         fee_estimate=fee_estimate,
@@ -66,9 +95,9 @@ def build_paper_risk_context(
         symbol_precision_ok=True,
         min_size_ok=True,
         reconciliation_ok=True,
-        recent_proposal_ids=[],
-        duplicate_detected=False,
-        cooldown_active=False,
+        recent_proposal_ids=recent,
+        duplicate_detected=duplicate,
+        cooldown_active=snap.cooldown_active,
         account_state_refs=["acct:paper"],
         market_state_refs=[
             f"md:{instrument.symbol}:{validation.market_data_age_ms}"

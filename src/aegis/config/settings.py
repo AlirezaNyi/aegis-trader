@@ -159,6 +159,37 @@ class Settings(BaseSettings):
         description="Simulated slippage in basis points (paper/backtest only).",
     )
 
+    # Paper soak runner — engineering only. Default off. Never arms live.
+    paper_soak_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "AEGIS_PAPER_SOAK_ENABLED", "paper_soak_enabled"
+        ),
+        description="When true, poll public klines and run paper cycles on new final bars.",
+    )
+    paper_soak_symbol: str = Field(
+        default="ADAUSDT",
+        validation_alias=AliasChoices(
+            "AEGIS_PAPER_SOAK_SYMBOL", "paper_soak_symbol"
+        ),
+        description="Spot symbol for paper soak REST polls.",
+    )
+    paper_soak_interval: str = Field(
+        default="1m",
+        validation_alias=AliasChoices(
+            "AEGIS_PAPER_SOAK_INTERVAL", "paper_soak_interval"
+        ),
+        description="Kline interval for paper soak (1m|5m|15m).",
+    )
+    paper_soak_poll_seconds: float = Field(
+        default=30.0,
+        validation_alias=AliasChoices(
+            "AEGIS_PAPER_SOAK_POLL_SECONDS", "paper_soak_poll_seconds"
+        ),
+        gt=0,
+        description="Seconds between paper soak REST polls.",
+    )
+
     # Risk policy version loader — financial numbers live in owner-signed snapshots
     # (see docs/RISK_POLICY.md). Default 1.0 after owner approval; use 0.1-draft to
     # force the all-UNAPPROVED draft. Never arms live trading by itself.
@@ -198,6 +229,28 @@ class Settings(BaseSettings):
             msg = f"AEGIS_LOG_LEVEL must be one of {sorted(allowed)}, got {value!r}"
             raise ValueError(msg)
         return normalized
+
+    @field_validator("paper_soak_interval")
+    @classmethod
+    def _normalize_paper_soak_interval(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        allowed = {"1m", "5m", "15m"}
+        if normalized not in allowed:
+            msg = (
+                f"AEGIS_PAPER_SOAK_INTERVAL must be one of {sorted(allowed)}, "
+                f"got {value!r}"
+            )
+            raise ValueError(msg)
+        return normalized
+
+    @field_validator("paper_soak_symbol")
+    @classmethod
+    def _normalize_paper_soak_symbol(cls, value: str) -> str:
+        symbol = value.strip().upper()
+        if not symbol:
+            msg = "AEGIS_PAPER_SOAK_SYMBOL must be non-empty"
+            raise ValueError(msg)
+        return symbol
 
     @field_validator(
         "llm_token_budget",

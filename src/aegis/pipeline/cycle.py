@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
@@ -15,6 +16,12 @@ from aegis.features.engine import compute_features
 from aegis.interfaces.jev import JevPort
 from aegis.interfaces.llm import LlmPort
 from aegis.paper.broker import PaperBroker
+from aegis.paper.equity import (
+    PaperEquityTracker,
+    ProposalHistory,
+    compute_paper_equity,
+    instrument_mark_key,
+)
 from aegis.paper.exceptions import PaperBrokerError
 from aegis.pipeline.context import build_paper_risk_context
 from aegis.pipeline.intent import IntentBuildError, intent_from_approved
@@ -45,6 +52,8 @@ class PaperCycleDeps:
     analyst_concurrency: int = 5
     strategy_id: str = "aegis-default"
     strategy_version: str = "0.1.0"
+    equity_tracker: PaperEquityTracker = field(default_factory=PaperEquityTracker)
+    proposal_history: ProposalHistory = field(default_factory=ProposalHistory)
 
 
 @dataclass(frozen=True)
@@ -62,6 +71,13 @@ def _stale_after_ms(policy: RiskPolicy) -> int:
     if param is not None and param.status == ParamStatus.APPROVED and param.value is not None:
         return int(param.value)
     return 5000
+
+
+def _daily_loss_limit(policy: RiskPolicy) -> Decimal | None:
+    param = policy.get("RP-DAILY-LOSS-LIMIT")
+    if param is not None and param.status == ParamStatus.APPROVED and param.value is not None:
+        return Decimal(str(param.value))
+    return None
 
 
 def _reject_for_validation(
@@ -270,12 +286,19 @@ async def run_paper_cycle(
         strategy_version=deps.strategy_version,
         clock=lambda: clock,
     )
+    mark = validation.candles[-1].close
     context = build_paper_risk_context(
         now=clock,
         validation=validation,
         ledger=deps.paper_broker.ledger,
         instrument=instrument,
         proposal=proposal,
+        mark_price=mark,
+        equity_tracker=deps.equity_tracker,
+        proposal_history=deps.proposal_history,
+        daily_loss_limit=_daily_loss_limit(deps.risk_policy),
+        slippage_model_bps=Decimal(str(deps.settings.paper_slippage_bps)),
+        fee_estimate=Decimal(str(deps.settings.paper_fee_bps)),
     )
     decision = evaluate_risk(
         proposal,
@@ -283,18 +306,27 @@ async def run_paper_cycle(
         deps.settings,
         policy=deps.risk_policy,
     )
+    deps.proposal_history.record(proposal.proposal_id)
 
     order: Order | None = None
     fill_blocked: str | None = None
     if may_submit_to_order_manager(decision, now=clock):
         try:
             intent = intent_from_approved(decision, proposal, now=clock)
-            mid = validation.candles[-1].close
             order = deps.paper_broker.submit_from_risk_decision(
                 decision,
                 intent,
-                mid_price=mid,
+                mid_price=mark,
                 now=clock,
+            )
+            # Refresh equity after fill so peak/day start stay current.
+            deps.equity_tracker.observe(
+                compute_paper_equity(
+                    deps.paper_broker.ledger,
+                    marks={instrument_mark_key(instrument): mark},
+                ),
+                now=clock,
+                daily_loss_limit=_daily_loss_limit(deps.risk_policy),
             )
         except (IntentBuildError, PaperBrokerError, RiskHandoffDenied) as exc:
             # Fail closed: no paper fill. Decision remains for audit.

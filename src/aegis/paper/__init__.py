@@ -1,6 +1,13 @@
 """Paper broker and simulated ledger (Phase 6). Never submits to Toobit."""
 
 from aegis.paper.broker import PaperBroker
+from aegis.paper.equity import (
+    PaperEquitySnapshot,
+    PaperEquityTracker,
+    ProposalHistory,
+    compute_paper_equity,
+    instrument_mark_key,
+)
 from aegis.paper.exceptions import (
     PaperBrokerError,
     PaperFillError,
@@ -20,13 +27,18 @@ from aegis.paper.reconcile import (
 __all__ = [
     "PaperBroker",
     "PaperBrokerError",
+    "PaperEquitySnapshot",
+    "PaperEquityTracker",
     "PaperFillError",
     "PaperLedger",
     "PaperLedgerKindError",
     "PaperReconcileResult",
     "PaperTradingBlocked",
+    "ProposalHistory",
     "compute_fee",
     "compute_fill_price",
+    "compute_paper_equity",
+    "instrument_mark_key",
     "load_paper_ledger",
     "persist_and_reload",
     "persist_paper_ledger",

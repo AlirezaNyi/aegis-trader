@@ -35,6 +35,7 @@
 | Owner-approved risk-policy numeric limits | Approved as version **`1.0`** (see `docs/RISK_POLICY.md`); live still requires explicit arming + inventory reconcile |
 | Live Toobit client constructed in `create_app` | Intentionally **not** — `NullExecutionPort` |
 | Paper decision cycle | `app.state.run_paper_cycle` / `PaperCycleDeps` for finalized-candle paper soak; live mode refused; no LLM-on-every-tick background loop |
+| Paper soak runner | Optional `AEGIS_PAPER_SOAK_ENABLED` (default false): public REST poll → one cycle per new final bar; `NullExecutionPort` remains |
 | Full instrumented counters under production traffic | Counters exist; call-site wiring may be partial until soak |
 | Unauthenticated ops HTTP on localhost bind | Compose binds `127.0.0.1` for API/Postgres; reverse-proxy/auth still owner choice for remote hosts |
 | Host load / CVE image scan | Not executed in this artifact |

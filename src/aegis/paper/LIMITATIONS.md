@@ -28,3 +28,9 @@
 * In-memory snapshot + checksum equality reconcile balances/positions.
 * Postgres persistence uses `orders` / `fills` / `positions` / `paper_balances` with `ledger_kind='paper'`.
 * Reconcile is a simple checksum / equality check — not exchange-authoritative live reconcile.
+
+## Equity tracking (paper soak)
+
+* `PaperEquityTracker` derives `daily_loss` / `drawdown` / `cooldown_active` from marked equity.
+* Marks are cycle-provided closes; this is simulation MTM, not exchange mark price.
+* Peak and UTC-day start equity are in-process only (reset on restart unless snapshotted later).

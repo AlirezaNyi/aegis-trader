@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -11,10 +12,12 @@ from aegis import __version__
 from aegis.api.health import router as health_router
 from aegis.api.metrics import router as metrics_router
 from aegis.api.middleware import CorrelationIdMiddleware
-from aegis.config.settings import Settings, get_settings
+from aegis.config.settings import Settings, TradingMode, get_settings
 from aegis.interfaces.execution import NullExecutionPort
 from aegis.jev.factory import build_jev_port
 from aegis.logging import configure_logging, get_logger
+from aegis.market_data.gateway import MarketDataGateway
+from aegis.market_data.rest_client import ToobitRestMarketDataClient
 from aegis.ops.alerts import AlertEvaluator
 from aegis.ops.metrics import OpsMetrics
 from aegis.ops.shutdown import ShutdownGate
@@ -22,9 +25,24 @@ from aegis.orders.manager import OrderManager
 from aegis.paper.broker import PaperBroker
 from aegis.paper.ledger import PaperLedger
 from aegis.pipeline.cycle import PaperCycleDeps, run_paper_cycle
+from aegis.pipeline.soak import (
+    PaperSoakRunner,
+    run_soak_loop,
+    soak_instrument_from_settings,
+    soak_timeframe_from_settings,
+)
 from aegis.reconcile.service import Reconciler
 from aegis.risk.factory import build_risk_policy_from_settings
 from aegis.supervisor.factory import budget_config_from_settings, build_llm_port
+
+
+def _should_start_paper_soak(settings: Settings) -> bool:
+    return (
+        settings.paper_soak_enabled
+        and settings.is_paper_or_dev
+        and not settings.kill_switch
+        and settings.trading_mode != TradingMode.LIVE
+    )
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -44,17 +62,55 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             extra={"event": "app_start", "component": "main"},
         )
         logger.info(
-            "config_loaded mode=%s live_armed=%s kill_switch=%s",
+            "config_loaded mode=%s live_armed=%s kill_switch=%s paper_soak=%s",
             resolved.trading_mode.value,
             resolved.live_armed,
             resolved.kill_switch,
+            resolved.paper_soak_enabled,
             extra={"event": "config_loaded", "component": "main"},
         )
+        soak_task: asyncio.Task[None] | None = None
+        rest_client: ToobitRestMarketDataClient | None = None
         try:
+            if _should_start_paper_soak(resolved):
+                rest_client = ToobitRestMarketDataClient()
+                gateway = MarketDataGateway(rest_client)
+                runner = PaperSoakRunner(
+                    market_data=gateway,
+                    deps=_app.state.paper_cycle_deps,
+                    instrument=soak_instrument_from_settings(resolved),
+                    timeframe=soak_timeframe_from_settings(resolved),
+                )
+                _app.state.paper_soak_runner = runner
+                soak_task = asyncio.create_task(
+                    run_soak_loop(
+                        runner,
+                        poll_seconds=resolved.paper_soak_poll_seconds,
+                        shutdown=shutdown_gate,
+                    ),
+                    name="aegis-paper-soak",
+                )
+                logger.info(
+                    "paper_soak_started symbol=%s interval=%s poll=%s",
+                    resolved.paper_soak_symbol,
+                    resolved.paper_soak_interval,
+                    resolved.paper_soak_poll_seconds,
+                    extra={"event": "paper_soak_started", "component": "main"},
+                )
+            else:
+                _app.state.paper_soak_runner = None
             yield
         finally:
             shutdown_gate.begin_shutdown()
             ops_metrics.set_shutting_down(True)
+            if soak_task is not None:
+                soak_task.cancel()
+                try:
+                    await soak_task
+                except asyncio.CancelledError:
+                    pass
+            if rest_client is not None:
+                rest_client.close()
             logger.info(
                 "aegis_shutting_down",
                 extra={"event": "app_shutdown", "component": "main"},
@@ -73,7 +129,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.ops_metrics = ops_metrics
     app.state.shutdown_gate = shutdown_gate
     app.state.alert_evaluator = alert_evaluator
-    # Phase 4–7 ports + paper cycle. No LLM-on-every-tick loop.
+    # Phase 4–7 ports + paper cycle / optional soak. No LLM-on-every-tick loop.
     # Live Toobit client not constructed (SRS-SV-004).
     app.state.jev_port = build_jev_port(resolved)
     app.state.llm_port = build_llm_port(resolved)
@@ -107,6 +163,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.paper_cycle_deps = paper_cycle_deps
     app.state.run_paper_cycle = run_paper_cycle
+    app.state.paper_soak_runner = None
     app.include_router(health_router)
     app.include_router(metrics_router)
     return app
