@@ -45,7 +45,8 @@ docker compose up --build
 ```
 
 - Liveness: `GET /health`
-- Readiness: `GET /ready` (reports `"phase": 3`)
+- Readiness: `GET /ready` (reports `"phase": 8`)
+- Metrics: `GET /metrics` · Alert dry-run: `GET /ops/alerts/dry-run`
 
 ## Configuration
 

@@ -9,10 +9,15 @@ from fastapi import FastAPI
 
 from aegis import __version__
 from aegis.api.health import router as health_router
+from aegis.api.metrics import router as metrics_router
+from aegis.api.middleware import CorrelationIdMiddleware
 from aegis.config.settings import Settings, get_settings
 from aegis.interfaces.execution import NullExecutionPort
 from aegis.jev.factory import build_jev_port
 from aegis.logging import configure_logging, get_logger
+from aegis.ops.alerts import AlertEvaluator
+from aegis.ops.metrics import OpsMetrics
+from aegis.ops.shutdown import ShutdownGate
 from aegis.orders.manager import OrderManager
 from aegis.paper.broker import PaperBroker
 from aegis.paper.ledger import PaperLedger
@@ -25,6 +30,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     resolved = settings or get_settings()
     configure_logging(resolved.log_level)
     logger = get_logger("aegis.main")
+
+    ops_metrics = OpsMetrics()
+    ops_metrics.set_kill_switch(resolved.kill_switch)
+    shutdown_gate = ShutdownGate()
+    alert_evaluator = AlertEvaluator()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -39,7 +49,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             resolved.kill_switch,
             extra={"event": "config_loaded", "component": "main"},
         )
-        yield
+        try:
+            yield
+        finally:
+            shutdown_gate.begin_shutdown()
+            ops_metrics.set_shutting_down(True)
+            logger.info(
+                "aegis_shutting_down",
+                extra={"event": "app_shutdown", "component": "main"},
+            )
 
     app = FastAPI(
         title="Aegis",
@@ -49,7 +67,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ),
         lifespan=lifespan,
     )
+    app.add_middleware(CorrelationIdMiddleware)
     app.state.settings = resolved
+    app.state.ops_metrics = ops_metrics
+    app.state.shutdown_gate = shutdown_gate
+    app.state.alert_evaluator = alert_evaluator
     # Phase 4–7 ports — no tick loop; live Toobit client not constructed (SRS-SV-004).
     app.state.jev_port = build_jev_port(resolved)
     app.state.llm_port = build_llm_port(resolved)
@@ -71,6 +93,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         reconciler=reconciler,
     )
     app.include_router(health_router)
+    app.include_router(metrics_router)
     return app
 
 

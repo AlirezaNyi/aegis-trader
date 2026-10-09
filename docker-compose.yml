@@ -1,3 +1,6 @@
+# Aegis Compose — paper defaults; never silently enable live trading.
+# Target host guidance: ~4 vCPU / 8 GB RAM / 80 GB SSD (see docs/DEPLOYMENT.md).
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -12,9 +15,22 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-    # Not published publicly by default — local only
+    # Localhost-only publish; do not expose to public internet.
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
+    restart: unless-stopped
+    stop_grace_period: 30s
+    # Compose v2 resource bounds (engineering; not risk policy).
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 2G
+        reservations:
+          cpus: "0.25"
+          memory: 512M
+    mem_limit: 2g
+    cpus: 1.0
 
   aegis:
     build: .
@@ -28,14 +44,41 @@ services:
       AEGIS_REQUIRE_DATABASE: "true"
       DATABASE_URL: postgresql+psycopg://aegis:aegis@postgres:5432/aegis
       AEGIS_LOG_LEVEL: INFO
+      # Bounded concurrency / timeouts (engineering) — leave LLM budgets empty (fail-closed).
+      AEGIS_ANALYST_TIMEOUT_SECONDS: "2"
+      AEGIS_ANALYST_CONCURRENCY: "5"
+      AEGIS_JEV_TIMEOUT_SECONDS: "10"
+      AEGIS_SUPERVISOR_TIMEOUT_SECONDS: "15"
       TOOBIT_API_KEY: ""
       TOOBIT_API_SECRET: ""
       TYPESAFE_API_KEY: ""
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
+    restart: unless-stopped
+    stop_grace_period: 45s
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)\"",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.5"
+          memory: 4G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    mem_limit: 4g
+    cpus: 2.5
     command: >
       sh -c "alembic upgrade head &&
-             uvicorn aegis.main:app --host 0.0.0.0 --port 8000"
+             uvicorn aegis.main:app --host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 30"
 
 volumes:
   postgres_data:

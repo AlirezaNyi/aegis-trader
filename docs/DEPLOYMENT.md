@@ -1,7 +1,7 @@
 # Aegis — Deployment
 
-**Version:** 1.0
-**Status:** Proposed (Phase 0)
+**Version:** 1.1
+**Status:** Phase 8 accepted (paper posture)
 **Target host:** ~4 vCPU, 8 GB RAM, 80 GB SSD, no GPU
 **Package / service id:** `aegis`
 
@@ -13,26 +13,28 @@
 * Resource limits and bounded concurrency protect a small host.
 * Toobit Agent Trade Kit / MCP order tools are not part of this deployment.
 
-## 2. Proposed Compose topology
+## 2. Compose topology
 
 ```text
 services:
-  aegis:        # FastAPI app + in-process workers
+  aegis:        # FastAPI app + in-process ports (NullExecutionPort by default)
   postgres:     # system of record
   # optional later:
   # prometheus
   # grafana
 ```
 
-**Proposed** resource ceilings (tunable; not financial risk policy):
+Files: [`docker-compose.yml`](../docker-compose.yml), [`Dockerfile`](../Dockerfile).
 
-| Service | CPU | Memory |
+**Resource ceilings** (engineering; not financial risk policy):
+
+| Service | CPU limit | Memory limit |
 | --- | --- | --- |
-| `aegis` | leave headroom for OS | e.g. ≤ 4–5 GB |
-| `postgres` | shared | e.g. ≤ 2 GB |
-| monitoring | optional | small |
+| `aegis` | 2.5 | 4 GB |
+| `postgres` | 1.0 | 2 GB |
+| OS / headroom | remainder of ~4 vCPU / 8 GB | — |
 
-Exact Compose files are Phase 1/8 deliverables.
+Also set: `AEGIS_ANALYST_CONCURRENCY`, analyst/Jev/supervisor timeouts, uvicorn `--timeout-graceful-shutdown 30`, Compose `stop_grace_period`, and service `healthcheck` on `/health`.
 
 ## 3. Configuration surface
 
@@ -44,14 +46,14 @@ Exact Compose files are Phase 1/8 deliverables.
 | `DATABASE_URL` | Postgres | required |
 | `TOOBIT_API_KEY` / `TOOBIT_API_SECRET` | Exchange | empty in paper-only |
 | `TYPESAFE_API_KEY` | Jev | optional; mock if absent |
-| `LLM_*` | Supervisor provider | optional until chosen |
+| `LLM_*` / `AEGIS_LLM_*` | Supervisor provider | optional until chosen |
 
-`.env.example` must contain placeholders only.
+`.env.example` must contain placeholders only. Compose sets empty credential env vars — do not bake secrets into the image.
 
-## 4. Networking (**Proposed**)
+## 4. Networking
 
-* Postgres not published to public internet.
-* Owner control endpoints bound to localhost or private interface until hardened.
+* Postgres published only for local/dev convenience; do not expose to the public internet in production.
+* App listens on `:8000` (`/health`, `/ready`, `/metrics`, `/ops/alerts/dry-run`).
 * Outbound HTTPS to `api.toobit.com`, `stream.toobit.com`, `api.typesafe.ai`, and chosen LLM provider only as configured.
 
 ## 5. Live mode deployment rules
@@ -65,18 +67,30 @@ Live requires:
 5. Explicit `AEGIS_TRADING_MODE=live` **and** `AEGIS_LIVE_ARMED=true`.
 6. Completed checklist in [OPERATIONS.md](OPERATIONS.md).
 
+Compose examples keep paper + `live_armed=false`. Do not auto-activate live.
+
 ## 6. Rollback
 
 * Prefer immutable image tags.
 * Rollback = redeploy previous image + known DB migration compatibility.
-* After rollback, verify reconciliation and keep live disarmed until checks pass.
+* After rollback, verify reconciliation (`Reconciler` / restart recovery) and keep live disarmed until checks pass.
 
 ## 7. Security checks before declare ready
 
-* Dependency audit / image scan.
-* No secrets in image layers or compose files.
-* Confirm kill switch and paper default on boot.
+* Dependency audit / image scan (owner CI).
+* `scripts/check_image_secrets.sh` — secret absence smoke for compose/Dockerfile/.env.example.
+* Confirm kill switch and paper default on boot (`GET /ready`).
 
-## 8. Phase 8 acceptance link
+## 8. Quick start (paper)
 
-See [Phases/Phase8.md](../Phases/Phase8.md). Production readiness ≠ live activation.
+```bash
+cp .env.example .env   # placeholders only
+docker compose up --build
+curl -s localhost:8000/health
+curl -s localhost:8000/ready
+curl -s localhost:8000/metrics
+```
+
+## 9. Phase 8 acceptance link
+
+See [Phases/Phase8.md](../Phases/Phase8.md) and [READINESS_REPORT.md](READINESS_REPORT.md). Production readiness ≠ live activation.

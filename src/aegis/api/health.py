@@ -11,6 +11,7 @@ from aegis.config.settings import Settings
 from aegis.db.session import check_database
 from aegis.guards.live import live_execution_permitted, trading_ready
 from aegis.market_data.metrics import MarketDataMetrics
+from aegis.ops.shutdown import ShutdownGate
 
 router = APIRouter(tags=["health"])
 
@@ -23,13 +24,22 @@ def health() -> dict[str, str]:
 @router.get("/ready")
 def ready(request: Request) -> dict[str, Any]:
     settings: Settings = request.app.state.settings
+    shutdown: ShutdownGate | None = getattr(request.app.state, "shutdown_gate", None)
+    shutting_down = shutdown.shutting_down if shutdown is not None else False
+
     db_ok = True
     db_detail = "skipped"
     if settings.require_database:
         db_ok, db_detail = check_database(settings.database_url)
 
     mode_ready = trading_ready(settings)
-    ready_flag = db_ok and (settings.is_paper_or_dev or mode_ready)
+    # Kill switch must fail /ready closed in all modes (not only live).
+    ready_flag = (
+        db_ok
+        and not settings.kill_switch
+        and (settings.is_paper_or_dev or mode_ready)
+        and not shutting_down
+    )
 
     metrics: MarketDataMetrics | None = getattr(request.app.state, "market_data_metrics", None)
     market_data: dict[str, object]
@@ -49,6 +59,7 @@ def ready(request: Request) -> dict[str, Any]:
         "database": {"ok": db_ok, "detail": db_detail},
         "market_data": market_data,
         "jev_configured": settings.jev_configured,
-        "phase": 7,
+        "phase": 8,
         "live_submit_client": "not_constructed",
+        "shutting_down": shutting_down,
     }

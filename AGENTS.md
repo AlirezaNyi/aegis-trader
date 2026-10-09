@@ -6,10 +6,10 @@ Source of truth for product and architecture: [`docs/`](docs/). Phase guides: [`
 
 ## Current state
 
-- **Implemented through Phase 7:** foundation, market data, feature engine, five analysts, evidence packages, Jev (official TypeSafe System One or unavailable mock), LLM Supervisor (schema proposals / fail-closed NO_TRADE), Deterministic Risk Engine (APPROVE/REJECT; draft policy keeps financial limits UNAPPROVED), paper broker + deterministic backtest, Order Manager + Toobit Spot/Futures adapters + reconciler (mock-tested; no blind retry). LLM provider choice, spend budgets, and risk-policy numerics remain owner-approved / empty-or-draft by default.
+- **Implemented through Phase 8:** foundation through Order Manager + Toobit adapters + reconciler, plus deployment readiness (Compose resource limits, `/metrics`, alert dry-run, correlation middleware, graceful shutdown, backup/restore scripts, ops docs, readiness report). LLM provider choice, spend budgets, and risk-policy numerics remain owner-approved / empty-or-draft by default.
 - **Stubbed:** `validation` (pipeline stage). Live submit client is **not constructed** in `create_app` until owner arms all live gates and wires `build_execution_port`.
 - **Exchange adapter:** credential-plane HMAC adapters exist (`LIVE_SUBMIT_SUPPORTED=True`); default runtime uses `NullExecutionPort`. Never call withdrawal endpoints.
-- **Default mode:** paper. Live trading requires explicit owner approval and all live gates.
+- **Default mode:** paper. Live trading requires explicit owner approval and all live gates. Phase 8 does **not** activate live.
 
 ## Decision pipeline
 
