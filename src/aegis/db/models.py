@@ -1,4 +1,4 @@
-"""SQLAlchemy models (Phase 1–4: audit, features, evidence, proposals)."""
+"""SQLAlchemy models (Phase 1–5: audit, features, evidence, proposals, risk)."""
 
 from __future__ import annotations
 
@@ -155,6 +155,30 @@ class TradeProposalRow(Base):
     supervisor_model_meta: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default=dict
     )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class RiskDecisionRow(Base):
+    __tablename__ = "risk_decisions"
+
+    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    proposal_id: Mapped[Any] = mapped_column(UUID(as_uuid=True), nullable=False)
+    correlation_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    decision: Mapped[str] = mapped_column(String(16), nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    rules_evaluated: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    rejection_reasons: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    validated_order_params: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True
+    )
+    account_state_refs: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    market_state_refs: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
