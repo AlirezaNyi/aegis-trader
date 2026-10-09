@@ -20,19 +20,35 @@ def set_correlation_id(correlation_id: str | None) -> None:
     correlation_id_var.set(correlation_id)
 
 
+_SECRET_FRAGMENTS = (
+    "signature=",
+    "api_secret",
+    "api_key",
+    "x-bb-apikey",
+    "authorization:",
+)
+
+
+def _redact(text: str) -> str:
+    lowered = text.lower()
+    if any(fragment in lowered for fragment in _SECRET_FRAGMENTS):
+        return "[REDACTED]"
+    return text
+
+
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
             "ts": datetime.now(UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "msg": record.getMessage(),
+            "msg": _redact(record.getMessage()),
         }
         correlation_id = get_correlation_id()
         if correlation_id:
             payload["correlation_id"] = correlation_id
         if record.exc_info:
-            payload["exc_info"] = self.formatException(record.exc_info)
+            payload["exc_info"] = _redact(self.formatException(record.exc_info))
         for key in ("event", "component", "proposal_id", "order_id"):
             if hasattr(record, key):
                 payload[key] = getattr(record, key)

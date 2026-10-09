@@ -159,6 +159,25 @@ class Settings(BaseSettings):
         description="Simulated slippage in basis points (paper/backtest only).",
     )
 
+    # Exchange transport bounds — engineering only, NOT risk-policy numbers.
+    exchange_recv_window_ms: int = Field(
+        default=5000,
+        validation_alias=AliasChoices(
+            "AEGIS_EXCHANGE_RECV_WINDOW_MS", "exchange_recv_window_ms"
+        ),
+        ge=1,
+        le=60000,
+        description="Toobit SIGNED recvWindow (ms); verified max 60000.",
+    )
+    exchange_timeout_seconds: float = Field(
+        default=10.0,
+        validation_alias=AliasChoices(
+            "AEGIS_EXCHANGE_TIMEOUT_SECONDS", "exchange_timeout_seconds"
+        ),
+        gt=0,
+        description="HTTP timeout for live exchange adapter (engineering bound).",
+    )
+
     @field_validator("log_level")
     @classmethod
     def _normalize_log_level(cls, value: str) -> str:

@@ -271,10 +271,11 @@ def test_live_mode_refused_and_no_exchange_calls() -> None:
             seed=0,
         )
 
-    # Paper path does not touch exchange package submit
+    # Paper path does not touch exchange live submit; flag means path exists (Phase 7)
     import aegis.exchange as exchange
 
-    assert exchange.LIVE_SUBMIT_SUPPORTED is False
+    assert exchange.LIVE_SUBMIT_SUPPORTED is True
+
 
 
 def test_may_submit_false_for_reject() -> None:

@@ -1,10 +1,9 @@
-"""Execution and exchange package safety tests."""
+"""Execution port and exchange package safety tests."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -30,17 +29,21 @@ def test_null_execution_refuses_submit() -> None:
         quantity=Decimal("1"),
         created_at=datetime.now(UTC),
     )
-    with pytest.raises(RuntimeError, match="Phase 1"):
+    with pytest.raises(RuntimeError, match="null"):
         port.submit(intent)
 
 
-def test_exchange_package_has_no_http_client_modules() -> None:
-    assert exchange.LIVE_SUBMIT_SUPPORTED is False
-    root = Path(exchange.__file__).resolve().parent
-    py_files = list(root.rglob("*.py"))
-    forbidden = ("requests", "httpx", "aiohttp", "websocket")
-    for path in py_files:
-        text = path.read_text(encoding="utf-8")
-        for name in forbidden:
-            assert f"import {name}" not in text
-            assert f"from {name}" not in text
+def test_exchange_live_submit_supported_but_factory_defaults_null() -> None:
+    """Phase 7: code path exists; default factory without live gates is Null."""
+    assert exchange.LIVE_SUBMIT_SUPPORTED is True
+    from aegis.config.settings import Settings, TradingMode, clear_settings_cache
+    from aegis.exchange.factory import build_execution_port
+
+    clear_settings_cache()
+    settings = Settings(
+        trading_mode=TradingMode.PAPER,
+        live_armed=False,
+        kill_switch=False,
+        require_database=False,
+    )
+    assert isinstance(build_execution_port(settings), NullExecutionPort)

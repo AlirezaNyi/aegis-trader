@@ -22,7 +22,7 @@ def test_ready_includes_market_data_metrics() -> None:
     app.state.market_data_metrics = metrics
     client = TestClient(app)
     body = client.get("/ready").json()
-    assert body["phase"] == 6
+    assert body["phase"] == 7
     assert body["market_data"]["configured"] is True
     assert body["market_data"]["events_received"] == 1
     assert body["live_submit_client"] == "not_constructed"
