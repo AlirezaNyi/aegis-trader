@@ -6,7 +6,8 @@ Source of truth for product and architecture: [`docs/`](docs/). Phase guides: [`
 
 ## Current state
 
-- **Implemented through Phase 8:** foundation through Order Manager + Toobit adapters + reconciler, plus deployment readiness (Compose resource limits, `/metrics`, alert dry-run, correlation middleware, graceful shutdown, backup/restore scripts, ops docs, readiness report). Final system audit: [`docs/FINAL_SYSTEM_AUDIT.md`](docs/FINAL_SYSTEM_AUDIT.md) — **PAPER-TRADING READY**; live not activated. LLM provider choice, spend budgets, and risk-policy numerics remain owner-approved / empty-or-draft by default.
+- **Implemented through Phase 8:** foundation through Order Manager + Toobit adapters + reconciler, plus deployment readiness (Compose resource limits, `/metrics`, alert dry-run, correlation middleware, graceful shutdown, backup/restore scripts, ops docs, readiness report). Final system audit: [`docs/FINAL_SYSTEM_AUDIT.md`](docs/FINAL_SYSTEM_AUDIT.md) — **PAPER-TRADING READY**; live not activated.
+- **Risk policy:** owner-approved version **`1.0`** loaded by default (`AEGIS_RISK_POLICY_VERSION`; see [`docs/RISK_POLICY.md`](docs/RISK_POLICY.md), `src/aegis/risk/owner_v1.py`). Live still requires explicit arming. LLM provider choice and spend budgets remain owner-set / empty-or-fail-closed.
 - **Stubbed:** `validation` (pipeline stage). Live submit client is **not constructed** in `create_app` until owner arms all live gates and wires `build_execution_port`.
 - **Exchange adapter:** credential-plane HMAC adapters exist (`LIVE_SUBMIT_SUPPORTED=True`); default runtime uses `NullExecutionPort`. Never call withdrawal endpoints.
 - **Default mode:** paper. Live trading requires explicit owner approval and all live gates. Phase 8 does **not** activate live.

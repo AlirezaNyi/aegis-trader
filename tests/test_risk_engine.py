@@ -180,12 +180,49 @@ def test_default_draft_buy_rejects_unapproved() -> None:
     assert any("UNAPPROVED" in r["detail"] for r in decision.rejection_reasons)
 
 
-def test_factory_returns_draft() -> None:
+def test_factory_returns_owner_v1_by_default() -> None:
     policy = build_risk_policy_from_settings(_settings())
-    assert policy.policy_version == "0.1-draft"
+    assert policy.policy_version == "1.0"
+    assert policy.is_draft is False
     assert policy.get("RP-MAX-LEVERAGE") is not None
-    assert policy.get("RP-MAX-LEVERAGE").status == ParamStatus.UNAPPROVED  # type: ignore[union-attr]
+    assert policy.get("RP-MAX-LEVERAGE").status == ParamStatus.APPROVED  # type: ignore[union-attr]
+    assert policy.get("RP-MAX-LEVERAGE").value == Decimal("1")  # type: ignore[union-attr]
+    assert policy.get("RP-DAILY-LOSS-LIMIT").value == Decimal("2.2")  # type: ignore[union-attr]
     assert policy.get("RP-MODE-DEFAULT").status == ParamStatus.APPROVED  # type: ignore[union-attr]
+
+
+def test_factory_draft_when_version_override() -> None:
+    policy = build_risk_policy_from_settings(_settings(risk_policy_version="0.1-draft"))
+    assert policy.policy_version == "0.1-draft"
+    assert policy.get("RP-MAX-LEVERAGE").status == ParamStatus.UNAPPROVED  # type: ignore[union-attr]
+
+
+def test_owner_v1_can_approve_healthy_paper_buy() -> None:
+    from aegis.risk.owner_v1 import owner_approved_policy_v1
+
+    decision = evaluate_risk(
+        _proposal(
+            symbol="ETHUSDT",
+            sizing={"method": "fixed_notional", "notional": "2"},
+            strategy_id="aegis-default",
+            strategy_version="0.1.0",
+            stop_loss=Decimal("96"),  # 4% from entry 100; v1 max stop distance 5%
+        ),
+        _healthy_context(
+            proposed_notional=Decimal("2"),
+            instrument_notional=Decimal("0"),
+            aggregate_notional=Decimal("0"),
+            daily_loss=Decimal("0"),
+            drawdown=Decimal("0"),
+            spread=Decimal("5"),
+            slippage_model_bps=Decimal("5"),
+            fee_estimate=Decimal("5"),
+        ),
+        _settings(),
+        policy=owner_approved_policy_v1(),
+    )
+    assert decision.decision == RiskDecisionType.APPROVE
+    assert decision.policy_version == "1.0"
 
 
 def test_kill_switch_reject() -> None:

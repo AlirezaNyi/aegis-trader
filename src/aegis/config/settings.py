@@ -159,6 +159,17 @@ class Settings(BaseSettings):
         description="Simulated slippage in basis points (paper/backtest only).",
     )
 
+    # Risk policy version loader — financial numbers live in owner-signed snapshots
+    # (see docs/RISK_POLICY.md). Default 1.0 after owner approval; use 0.1-draft to
+    # force the all-UNAPPROVED draft. Never arms live trading by itself.
+    risk_policy_version: str = Field(
+        default="1.0",
+        validation_alias=AliasChoices(
+            "AEGIS_RISK_POLICY_VERSION", "risk_policy_version"
+        ),
+        description="Policy snapshot id loaded by build_risk_policy_from_settings.",
+    )
+
     # Exchange transport bounds — engineering only, NOT risk-policy numbers.
     exchange_recv_window_ms: int = Field(
         default=5000,

@@ -76,7 +76,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.jev_port = build_jev_port(resolved)
     app.state.llm_port = build_llm_port(resolved)
     app.state.supervisor_budgets = budget_config_from_settings(resolved)
-    # Draft risk policy: financial RP-* remain UNAPPROVED until owner signs a version.
+    # Risk policy from AEGIS_RISK_POLICY_VERSION (default owner v1.0). Does not arm live.
     app.state.risk_policy = build_risk_policy_from_settings(resolved)
     # Paper ledger — simulation only.
     paper_ledger = PaperLedger()

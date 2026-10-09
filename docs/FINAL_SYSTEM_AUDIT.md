@@ -29,7 +29,7 @@ Passing tests do not establish profitability or guarantee safety.
 | 5 | Duplicate order prevention | **PASS** (clientOrderId + attempt tracker; RP duplicate window when approved) |
 | 6 | Credentials inaccessible to analysts/Jev/LLM | **PASS** (Settings on `app.state` is residual T-11 surface) |
 | 7 | Withdrawal not requested | **PASS** |
-| 8 | Risk policies versioned / deterministic / auditable | **PASS** (financial RP-* remain **UNAPPROVED**) |
+| 8 | Risk policies versioned / deterministic / auditable | **PASS** — owner policy **`1.0`** approved 2026-10-09; live still disarmed |
 | 9 | Orders/fills/positions/balances reconcile vs exchange | **GAP** — per-order get_order only; no inventory reconcile |
 | 10 | New-order block ≠ cancel/protect | **PASS** (auto cancel/protect UNAPPROVED / ADR 0006) |
 | 11 | Backtest look-ahead + modeled costs | **PASS** (scoped; no funding/latency model) |
@@ -53,7 +53,7 @@ None for paper posture. Live activation remains owner-blocked by design (UNAPPRO
 | ID | Finding | Evidence | Impact |
 | --- | --- | --- | --- |
 | M1 | No account-wide fill/position/balance reconcile against exchange | `reconcile/LIMITATIONS.md`, `interfaces/execution.py` (submit/cancel/get_order only) | Audit item 9 incomplete for live inventory parity |
-| M2 | Financial RP-* UNAPPROVED; numeric freshness/size not owner-signed | `risk/policy.py`, `docs/RISK_POLICY.md` | Live APPROVE correctly blocked; cannot claim live-ready |
+| M2 | *(Resolved for paper)* Owner policy `1.0` signed; live still requires explicit arming + inventory reconcile | `risk/owner_v1.py`, `docs/RISK_POLICY.md` | Paper can APPROVE under v1.0; live not armed by policy load |
 | M3 | Emergency cancel/protect automation UNAPPROVED | ADR 0006; `OPERATIONS.md` §4.2–4.3 | Kill blocks new orders only; open exposure needs owner action |
 | M4 | Backup restore / alert delivery not E2E proven | `READINESS_REPORT.md`; alert dry-run only | Ops “tested” claim incomplete for live |
 | M5 | Full `Settings` (incl. secrets) on `app.state` | `main.py`, threat model T-11 | Miswired dump endpoint could leak credentials |
@@ -114,7 +114,7 @@ Paper soak on target host is appropriate. Live remains a separate owner decision
 
 ## 7. Unresolved assumptions and risks
 
-* Owner-approved risk-policy numeric values (all financial RP-*).
+* ~~Owner-approved risk-policy numeric values~~ — **done for v1.0** (assumptions documented; bump to 1.1+ to change).
 * On-call / notification channel; backup retention.
 * Whether emergencies may auto-cancel or auto-close.
 * Account inventory REST (balances/positions) for full reconcile.

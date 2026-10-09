@@ -1,34 +1,27 @@
-# Risk Engine limitations (Phase 5)
+# Risk Engine limitations
 
-## Draft policy cannot APPROVE
+## Owner policy v1.0
 
-* Default policy version `0.1-draft` keeps every financial parameter in `docs/RISK_POLICY.md` §2 as `UNAPPROVED` with `value=None`.
-* BUY/SELL evaluations against the draft always **REJECT**, citing UNAPPROVED required params (and any other failures).
-* APPROVE is only possible when a `RiskPolicy` is explicitly constructed with APPROVED params (tests or a future owner-loaded version).
+* Default runtime loads owner-approved snapshot `1.0` via `AEGIS_RISK_POLICY_VERSION` (see `owner_v1.py` and `docs/RISK_POLICY.md`).
+* Set `AEGIS_RISK_POLICY_VERSION=0.1-draft` to force all financial params UNAPPROVED (BUY/SELL always REJECT on those rules).
+* Unknown version ids fail closed to the draft.
 
-## Owner must approve a policy version
+## Emergency cancel / protect (ADR 0006)
 
-* Numeric leverage, notional, loss, drawdown, freshness, allowlists, and related limits are **not** invented as production defaults.
-* `build_risk_policy_from_settings` always returns `default_draft_policy()` — there is no owner-approved loader yet.
-* Live mode: draft policy versions are rejected via `RP-POLICY-VERSION`; any required UNAPPROVED param also blocks APPROVE.
-* `RiskPolicy` snapshots are immutable (`MappingProxyType`); use `with_approved_params` to build a new snapshot.
-
-## Emergency cancel / protect unresolved (ADR 0006)
-
+* v1.0 marks `RP-EMERGENCY-CANCEL` / `RP-EMERGENCY-PROTECT` as APPROVED **false** (manual only).
 * This engine only decides **new-trade** APPROVE/REJECT.
 * Blocking new orders ≠ cancel open orders ≠ protect/close positions.
-* `RP-EMERGENCY-CANCEL` and `RP-EMERGENCY-PROTECT` remain UNAPPROVED; no automatic cancel/close.
 
 ## Stop-loss is not a fill guarantee
 
 * When stops are present or required, validated params / rejection details note that stop-loss instructions do not guarantee fill price or occurrence.
 
-## Upstream pipeline still stubbed
+## Upstream pipeline
 
-* Validation, account/ledger feeds, and Order Manager / paper / exchange submit are outside Phase 5.
 * Callers must supply an honest `RiskContext`; missing critical fields ⇒ REJECT.
+* Tiny notional caps (2–10 USDT) may conflict with exchange min notional on BTC/ETH — expect REJECT via `RP-MIN-SIZE` / exchange filters when wired.
 
-## Live remains disabled
+## Live remains disabled by default
 
-* Live submit still requires `trading_mode=live`, `live_armed=true`, and `kill_switch=false` (see `aegis.guards.live`).
-* Phase 5 does not arm live mode or weaken settings startup validation.
+* Live submit still requires `trading_mode=live`, `live_armed=true`, and `kill_switch=false`.
+* Loading policy `1.0` does **not** arm live mode.
