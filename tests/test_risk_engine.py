@@ -118,6 +118,8 @@ def _healthy_context(**overrides: Any) -> RiskContext:
         recent_proposal_ids=[],
         duplicate_detected=False,
         cooldown_active=False,
+        best_bid=Decimal("99.9"),
+        best_ask=Decimal("100.1"),
         account_state_refs=["acct:paper"],
         market_state_refs=["md:eth"],
     )
@@ -424,3 +426,336 @@ def test_determinism_identical_inputs() -> None:
     assert a.rules_evaluated == b.rules_evaluated
     assert _rule_ids(a) == _rule_ids(b)
     assert len(a.rejection_reasons) == len(b.rejection_reasons)
+
+
+# --- RP-STOP-LOSS-SIDE / RP-TAKE-PROFIT-SIDE (structural, non-numeric) ---
+
+
+def test_long_stop_above_entry_rejects_stop_side() -> None:
+    # Mirrors live soak 2026-10-13: long with stop above entry.
+    decision = evaluate_risk(
+        _proposal(stop_loss=Decimal("101"), take_profit=Decimal("120")),
+        _healthy_context(),
+        _settings(),
+        policy=_approved_test_policy(),
+    )
+    assert decision.decision == RiskDecisionType.REJECT
+    assert _rule_ids(decision) == {"RP-STOP-LOSS-SIDE"}
+    assert "RP-STOP-LOSS-SIDE" in decision.rules_evaluated
+    assert may_submit_to_order_manager(decision, now=_now()) is False
+
+
+def test_long_stop_equal_entry_rejects_stop_side() -> None:
+    decision = evaluate_risk(
+        _proposal(stop_loss=Decimal("100.0")),
+        _healthy_context(),
+        _settings(),
+        policy=_approved_test_policy(),
+    )
+    assert decision.decision == RiskDecisionType.REJECT
+    assert "RP-STOP-LOSS-SIDE" in _rule_ids(decision)
+
+
+def test_long_take_profit_below_entry_rejects_tp_side() -> None:
+    decision = evaluate_risk(
+        _proposal(stop_loss=Decimal("90"), take_profit=Decimal("99")),
+        _healthy_context(),
+        _settings(),
+        policy=_approved_test_policy(),
+    )
+    assert decision.decision == RiskDecisionType.REJECT
+    assert _rule_ids(decision) == {"RP-TAKE-PROFIT-SIDE"}
+
+
+def test_long_take_profit_equal_entry_rejects_tp_side() -> None:
+    decision = evaluate_risk(
+        _proposal(take_profit=Decimal("100")),
+        _healthy_context(),
+        _settings(),
+        policy=_approved_test_policy(),
+    )
+    assert decision.decision == RiskDecisionType.REJECT
+    assert "RP-TAKE-PROFIT-SIDE" in _rule_ids(decision)
+
+
+def test_valid_long_passes_side_rules() -> None:
+    decision = evaluate_risk(
+        _proposal(stop_loss=Decimal("90"), take_profit=Decimal("120")),
+        _healthy_context(),
+        _settings(),
+        policy=_approved_test_policy(),
+    )
+    assert decision.decision == RiskDecisionType.APPROVE
+    assert "RP-STOP-LOSS-SIDE" in decision.rules_evaluated
+    assert "RP-TAKE-PROFIT-SIDE" in decision.rules_evaluated
+
+
+def test_short_stop_below_entry_rejects_stop_side() -> None:
+    decision = evaluate_risk(
+        _proposal(
+            action=ProposalAction.SELL,
+            direction=TradeDirection.SHORT,
+            stop_loss=Decimal("95"),
+            take_profit=Decimal("80"),
+        ),
+        _healthy_context(),
+        _settings(),
+        policy=_approved_test_policy(),
+    )
+    assert decision.decision == RiskDecisionType.REJECT
+    assert _rule_ids(decision) == {"RP-STOP-LOSS-SIDE"}
+
+
+def test_short_take_profit_above_entry_rejects_tp_side() -> None:
+    decision = evaluate_risk(
+        _proposal(
+            action=ProposalAction.SELL,
+            direction=TradeDirection.SHORT,
+            stop_loss=Decimal("110"),
+            take_profit=Decimal("105"),
+        ),
+        _healthy_context(),
+        _settings(),
+        policy=_approved_test_policy(),
+    )
+    assert decision.decision == RiskDecisionType.REJECT
+    assert _rule_ids(decision) == {"RP-TAKE-PROFIT-SIDE"}
+
+
+def test_valid_short_passes_side_rules() -> None:
+    decision = evaluate_risk(
+        _proposal(
+            action=ProposalAction.SELL,
+            direction=TradeDirection.SHORT,
+            stop_loss=Decimal("110"),
+            take_profit=Decimal("80"),
+        ),
+        _healthy_context(),
+        _settings(),
+        policy=_approved_test_policy(),
+    )
+    assert decision.decision == RiskDecisionType.APPROVE
+    assert "RP-STOP-LOSS-SIDE" in decision.rules_evaluated
+    assert "RP-TAKE-PROFIT-SIDE" in decision.rules_evaluated
+
+
+def test_side_rules_missing_entry_fail_closed() -> None:
+    decision = evaluate_risk(
+        _proposal(entry_conditions={"order_type": "LIMIT", "time_in_force": "GTC"}),
+        _healthy_context(),
+        _settings(),
+        policy=_approved_test_policy(),
+    )
+    assert decision.decision == RiskDecisionType.REJECT
+    ids = _rule_ids(decision)
+    assert "RP-STOP-LOSS-SIDE" in ids
+    assert "RP-TAKE-PROFIT-SIDE" in ids
+
+
+def test_side_rules_non_numeric_entry_fail_closed() -> None:
+    decision = evaluate_risk(
+        _proposal(
+            entry_conditions={
+                "order_type": "LIMIT",
+                "time_in_force": "GTC",
+                "entry_price": "not-a-number",
+            },
+        ),
+        _healthy_context(),
+        _settings(),
+        policy=_approved_test_policy(),
+    )
+    assert decision.decision == RiskDecisionType.REJECT
+    ids = _rule_ids(decision)
+    assert "RP-STOP-LOSS-SIDE" in ids
+    assert "RP-TAKE-PROFIT-SIDE" in ids
+    # Distance rule must also fail closed rather than raise.
+    assert "RP-STOP-LOSS-MAX-DISTANCE" in ids
+
+
+def test_side_rules_enforced_under_draft_policy() -> None:
+    decision = evaluate_risk(
+        _proposal(stop_loss=Decimal("101")),
+        _healthy_context(),
+        _settings(),
+        policy=default_draft_policy(),
+    )
+    assert decision.decision == RiskDecisionType.REJECT
+    assert "RP-STOP-LOSS-SIDE" in _rule_ids(decision)
+
+
+def test_side_rules_absent_levels_not_evaluated() -> None:
+    decision = evaluate_risk(
+        _proposal(take_profit=None),
+        _healthy_context(),
+        _settings(),
+        policy=_approved_test_policy(),
+    )
+    assert decision.decision == RiskDecisionType.APPROVE
+    assert "RP-TAKE-PROFIT-SIDE" not in decision.rules_evaluated
+
+
+# --- RP-ENTRY-VS-BOOK (structural: entry_price tied to observed book) ---
+
+
+def _entry(price: str, order_type: str | None = "LIMIT") -> dict[str, Any]:
+    ec: dict[str, Any] = {"time_in_force": "GTC", "entry_price": price}
+    if order_type is not None:
+        ec["order_type"] = order_type
+    return ec
+
+
+def test_buy_entry_above_ask_rejects_entry_vs_book() -> None:
+    # M3: a long declaring entry far above market with a stop "below entry"
+    # that is actually above the real fill must be rejected.
+    decision = evaluate_risk(
+        _proposal(
+            entry_conditions=_entry("150"),
+            stop_loss=Decimal("140"),
+            take_profit=Decimal("170"),
+            sizing={"method": "fixed_notional", "notional": "50"},
+        ),
+        _healthy_context(best_bid=Decimal("99.9"), best_ask=Decimal("100.1")),
+        _settings(),
+        policy=_approved_test_policy(
+            **{"RP-STOP-LOSS-MAX-DISTANCE": Decimal("50")}
+        ),
+    )
+    assert decision.decision == RiskDecisionType.REJECT
+    assert "RP-ENTRY-VS-BOOK" in _rule_ids(decision)
+    assert "RP-ENTRY-VS-BOOK" in decision.rules_evaluated
+    assert may_submit_to_order_manager(decision, now=_now()) is False
+
+
+def test_buy_entry_just_above_ask_rejects_no_tolerance() -> None:
+    decision = evaluate_risk(
+        _proposal(entry_conditions=_entry("100.1000001")),
+        _healthy_context(best_ask=Decimal("100.1")),
+        _settings(),
+        policy=_approved_test_policy(),
+    )
+    assert decision.decision == RiskDecisionType.REJECT
+    assert _rule_ids(decision) == {"RP-ENTRY-VS-BOOK"}
+
+
+@pytest.mark.parametrize("price", ["100.1", "100", "99.5"])
+def test_buy_entry_at_or_below_ask_passes(price: str) -> None:
+    decision = evaluate_risk(
+        _proposal(entry_conditions=_entry(price)),
+        _healthy_context(best_ask=Decimal("100.1")),
+        _settings(),
+        policy=_approved_test_policy(),
+    )
+    assert decision.decision == RiskDecisionType.APPROVE
+    assert "RP-ENTRY-VS-BOOK" in decision.rules_evaluated
+
+
+def test_sell_entry_below_bid_rejects_entry_vs_book() -> None:
+    decision = evaluate_risk(
+        _proposal(
+            action=ProposalAction.SELL,
+            direction=TradeDirection.SHORT,
+            entry_conditions=_entry("99.8"),
+            stop_loss=Decimal("110"),
+            take_profit=Decimal("80"),
+        ),
+        _healthy_context(best_bid=Decimal("99.9")),
+        _settings(),
+        policy=_approved_test_policy(),
+    )
+    assert decision.decision == RiskDecisionType.REJECT
+    assert _rule_ids(decision) == {"RP-ENTRY-VS-BOOK"}
+
+
+@pytest.mark.parametrize("price", ["99.9", "100", "100.5"])
+def test_sell_entry_at_or_above_bid_passes(price: str) -> None:
+    decision = evaluate_risk(
+        _proposal(
+            action=ProposalAction.SELL,
+            direction=TradeDirection.SHORT,
+            entry_conditions=_entry(price),
+            stop_loss=Decimal("110"),
+            take_profit=Decimal("80"),
+        ),
+        _healthy_context(best_bid=Decimal("99.9")),
+        _settings(),
+        policy=_approved_test_policy(),
+    )
+    assert decision.decision == RiskDecisionType.APPROVE
+    assert "RP-ENTRY-VS-BOOK" in decision.rules_evaluated
+
+
+def test_buy_missing_best_ask_rejects() -> None:
+    decision = evaluate_risk(
+        _proposal(),
+        _healthy_context(best_ask=None),
+        _settings(),
+        policy=_approved_test_policy(),
+    )
+    assert decision.decision == RiskDecisionType.REJECT
+    assert _rule_ids(decision) == {"RP-ENTRY-VS-BOOK"}
+    assert any(
+        "book reference missing" in r["detail"] for r in decision.rejection_reasons
+    )
+
+
+def test_sell_missing_best_bid_rejects() -> None:
+    decision = evaluate_risk(
+        _proposal(
+            action=ProposalAction.SELL,
+            direction=TradeDirection.SHORT,
+            stop_loss=Decimal("110"),
+            take_profit=Decimal("80"),
+        ),
+        _healthy_context(best_bid=None),
+        _settings(),
+        policy=_approved_test_policy(),
+    )
+    assert decision.decision == RiskDecisionType.REJECT
+    assert _rule_ids(decision) == {"RP-ENTRY-VS-BOOK"}
+
+
+def test_entry_vs_book_non_numeric_entry_rejects() -> None:
+    decision = evaluate_risk(
+        _proposal(entry_conditions=_entry("abc")),
+        _healthy_context(),
+        _settings(),
+        policy=_approved_test_policy(),
+    )
+    assert decision.decision == RiskDecisionType.REJECT
+    assert "RP-ENTRY-VS-BOOK" in _rule_ids(decision)
+
+
+def test_entry_vs_book_missing_order_type_treated_as_limit() -> None:
+    decision = evaluate_risk(
+        _proposal(entry_conditions=_entry("150", order_type=None)),
+        _healthy_context(best_ask=Decimal("100.1")),
+        _settings(),
+        policy=default_draft_policy(),
+    )
+    assert decision.decision == RiskDecisionType.REJECT
+    assert "RP-ENTRY-VS-BOOK" in _rule_ids(decision)
+
+
+def test_entry_vs_book_enforced_under_draft_policy() -> None:
+    decision = evaluate_risk(
+        _proposal(entry_conditions=_entry("150"), stop_loss=Decimal("140"),
+                  take_profit=Decimal("170")),
+        _healthy_context(best_ask=Decimal("100.1")),
+        _settings(),
+        policy=default_draft_policy(),
+    )
+    assert decision.decision == RiskDecisionType.REJECT
+    assert "RP-ENTRY-VS-BOOK" in _rule_ids(decision)
+
+
+def test_market_order_skips_entry_vs_book() -> None:
+    decision = evaluate_risk(
+        _proposal(entry_conditions=_entry("100", order_type="MARKET")),
+        _healthy_context(best_ask=None),
+        _settings(),
+        policy=_approved_test_policy(
+            **{"RP-ORDER-TYPES-ALLOWED": {"LIMIT", "MARKET"}}
+        ),
+    )
+    assert "RP-ENTRY-VS-BOOK" not in decision.rules_evaluated

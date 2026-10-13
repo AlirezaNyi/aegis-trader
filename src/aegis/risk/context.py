@@ -33,5 +33,9 @@ class RiskContext:
     recent_proposal_ids: list[UUID] | None = None
     duplicate_detected: bool | None = None
     cooldown_active: bool | None = None
+    # Observed, fresh order-book top for the proposal instrument. Used by the
+    # structural RP-ENTRY-VS-BOOK rule; None ⇒ that rule fails closed.
+    best_bid: Decimal | None = None
+    best_ask: Decimal | None = None
     account_state_refs: list[str] = field(default_factory=list)
     market_state_refs: list[str] = field(default_factory=list)

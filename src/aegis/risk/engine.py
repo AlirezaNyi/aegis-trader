@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from aegis.config.settings import Settings, TradingMode
@@ -27,6 +27,13 @@ _SIDE_MAPPING_NOTE = (
 _STOP_NOT_GUARANTEED = (
     "Stop-loss instructions are not a guarantee of fill price or fill occurrence."
 )
+# Structural (non-numeric) rules: always enforced, independent of policy approval.
+_RULE_STOP_SIDE = "RP-STOP-LOSS-SIDE"
+_RULE_TP_SIDE = "RP-TAKE-PROFIT-SIDE"
+_RULE_ENTRY_VS_BOOK = "RP-ENTRY-VS-BOOK"
+# Order types for which a declared entry_price is a resting limit price. A
+# missing order_type is treated as LIMIT because intent building defaults to it.
+_MARKET_ORDER_TYPES = frozenset({"MARKET"})
 
 
 def evaluate_risk(
@@ -400,14 +407,21 @@ def evaluate_risk(
     max_stop_dist = _need_approved("RP-STOP-LOSS-MAX-DISTANCE")
     if max_stop_dist is not None and proposal.stop_loss is not None:
         entry = _entry_price(proposal)
+        entry_dec = _try_decimal(entry)
         if entry is None:
             _fail(
                 "RP-STOP-LOSS-MAX-DISTANCE",
                 "cannot verify stop distance without entry_price in "
                 "entry_conditions/sizing; stop fill not guaranteed",
             )
+        elif entry_dec is None:
+            _fail(
+                "RP-STOP-LOSS-MAX-DISTANCE",
+                f"cannot verify stop distance: non-numeric entry_price={entry!r}",
+            )
         else:
-            dist = abs(_to_decimal(entry) - _to_decimal(proposal.stop_loss))
+            entry = entry_dec
+            dist = abs(entry_dec - _to_decimal(proposal.stop_loss))
             # Interpret approved value as absolute price distance unless unit implies %.
             param = active.get("RP-STOP-LOSS-MAX-DISTANCE")
             if param is not None and param.unit in {"%", "percent", "pct"}:
@@ -433,12 +447,36 @@ def evaluate_risk(
     if tp_policy is not None and tp_policy is True and proposal.take_profit is None:
         _fail("RP-TAKE-PROFIT-POLICY", "take_profit required by approved policy")
 
+    # --- Stop-loss / take-profit side vs entry (structural, non-numeric) ---
+    # Evaluated regardless of policy approval status: a stop/target on the wrong
+    # side of entry is a malformed proposal, not a tunable threshold.
+    if proposal.stop_loss is not None:
+        _mark(_RULE_STOP_SIDE)
+        err = _level_side_error(proposal, proposal.stop_loss, protective=True)
+        if err is not None:
+            _fail(_RULE_STOP_SIDE, f"stop_loss {err}; {_STOP_NOT_GUARANTEED}")
+    if proposal.take_profit is not None:
+        _mark(_RULE_TP_SIDE)
+        err = _level_side_error(proposal, proposal.take_profit, protective=False)
+        if err is not None:
+            _fail(_RULE_TP_SIDE, f"take_profit {err}")
+
     # --- Order types / TIF ---
     order_types = _need_approved("RP-ORDER-TYPES-ALLOWED")
     order_type = (
         proposal.entry_conditions.get("order_type")
         or proposal.sizing.get("order_type")
     )
+
+    # --- Entry price vs observed book (structural, non-numeric) ---
+    # Ties the model-declared entry_price to the market so the stop/TP side
+    # rules above cannot be satisfied by a fictitious entry. No tolerance:
+    # any tolerance would be an owner-set number.
+    if order_type is None or str(order_type).strip().upper() not in _MARKET_ORDER_TYPES:
+        _mark(_RULE_ENTRY_VS_BOOK)
+        err = _entry_vs_book_error(proposal, context)
+        if err is not None:
+            _fail(_RULE_ENTRY_VS_BOOK, err)
     if order_types is not None:
         if order_type is None:
             _fail("RP-ORDER-TYPES-ALLOWED", "order_type missing on proposal")
@@ -624,6 +662,17 @@ def _to_decimal(value: Any) -> Decimal:
     return Decimal(str(value))
 
 
+def _try_decimal(value: Any) -> Decimal | None:
+    """Parse to a finite Decimal or return None (fail-closed helper)."""
+    if value is None:
+        return None
+    try:
+        dec = _to_decimal(value)
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    return dec if dec.is_finite() else None
+
+
 def _as_str_set(value: Any) -> set[str]:
     if isinstance(value, (set, frozenset, list, tuple)):
         return {str(item) for item in value}
@@ -635,6 +684,78 @@ def _directions_for_market(value: Any, market: str) -> set[str]:
         raw = value.get(market, value.get("all", []))
         return _as_str_set(raw)
     return _as_str_set(value)
+
+
+def _level_side_error(
+    proposal: TradeProposal, level: Any, *, protective: bool
+) -> str | None:
+    """Return a failure detail if ``level`` is on the wrong side of entry.
+
+    ``protective=True`` means stop-loss (long ⇒ below entry, short ⇒ above);
+    ``protective=False`` means take-profit (long ⇒ above, short ⇒ below).
+    Equal to entry fails. Missing/unparseable entry or direction fails closed.
+    """
+    direction = proposal.direction
+    if direction not in {TradeDirection.LONG, TradeDirection.SHORT}:
+        dval = direction.value if direction is not None else None
+        return f"side cannot be verified: direction={dval!r} (require long/short)"
+    raw_entry = _entry_price(proposal)
+    if raw_entry is None:
+        return (
+            "side cannot be verified without entry_price in "
+            "entry_conditions/sizing"
+        )
+    try:
+        entry = _to_decimal(raw_entry)
+        lvl = _to_decimal(level)
+    except (InvalidOperation, ValueError, TypeError):
+        return f"side cannot be verified: non-numeric entry_price={raw_entry!r}"
+    if not entry.is_finite() or not lvl.is_finite():
+        return f"side cannot be verified: non-finite entry={entry} level={lvl}"
+    is_long = direction == TradeDirection.LONG
+    must_be_below = is_long if protective else not is_long
+    if must_be_below and not lvl < entry:
+        return (
+            f"value={lvl} must be strictly below entry_price={entry} "
+            f"for direction={direction.value}"
+        )
+    if not must_be_below and not lvl > entry:
+        return (
+            f"value={lvl} must be strictly above entry_price={entry} "
+            f"for direction={direction.value}"
+        )
+    return None
+
+
+def _entry_vs_book_error(proposal: TradeProposal, context: RiskContext) -> str | None:
+    """Return a failure detail if a limit entry_price crosses the observed book.
+
+    BUY requires entry_price <= best_ask; SELL requires entry_price >= best_bid.
+    Missing book side, missing/non-numeric/non-positive entry fail closed.
+    """
+    raw_entry = _entry_price(proposal)
+    if raw_entry is None:
+        return "entry_price missing; cannot verify against order book"
+    entry = _try_decimal(raw_entry)
+    if entry is None:
+        return f"non-numeric entry_price={raw_entry!r}"
+    if entry <= 0:
+        return f"entry_price={entry} must be positive"
+    if proposal.action == ProposalAction.BUY:
+        ask = _try_decimal(context.best_ask)
+        if ask is None or ask <= 0:
+            return f"book reference missing: best_ask={context.best_ask!r}"
+        if entry > ask:
+            return f"BUY entry_price={entry} > best_ask={ask}; would cross the book"
+        return None
+    if proposal.action == ProposalAction.SELL:
+        bid = _try_decimal(context.best_bid)
+        if bid is None or bid <= 0:
+            return f"book reference missing: best_bid={context.best_bid!r}"
+        if entry < bid:
+            return f"SELL entry_price={entry} < best_bid={bid}; would cross the book"
+        return None
+    return f"action={proposal.action.value} has no book side"
 
 
 def _entry_price(proposal: TradeProposal) -> Any | None:

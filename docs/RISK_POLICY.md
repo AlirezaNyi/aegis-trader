@@ -111,6 +111,18 @@ Every new-trade evaluation must run these checks. Numeric comparisons use only a
 
 Any failure ⇒ REJECT with rule id(s).
 
+### Structural rules (non-numeric)
+
+These rules carry no owner-set numeric value. They validate proposal geometry and are enforced on every new-trade candidate regardless of policy version or parameter approval status (including the draft policy). They are recorded in `rules_evaluated` when the corresponding level is present (`RP-ENTRY-VS-BOOK`: whenever the order type is not `MARKET`).
+
+| ID | Check | Failure modes |
+| --- | --- | --- |
+| RP-STOP-LOSS-SIDE | When `stop_loss` is present: long ⇒ `stop_loss < entry_price`; short ⇒ `stop_loss > entry_price` | Wrong side; equal to entry; `entry_price` missing or non-numeric; direction not long/short |
+| RP-TAKE-PROFIT-SIDE | When `take_profit` is present: long ⇒ `take_profit > entry_price`; short ⇒ `take_profit < entry_price` | Wrong side; equal to entry; `entry_price` missing or non-numeric; direction not long/short |
+| RP-ENTRY-VS-BOOK | When `order_type` is not `MARKET` (missing ⇒ treated as `LIMIT`, matching intent building): BUY ⇒ `entry_price <= RiskContext.best_ask`; SELL ⇒ `entry_price >= RiskContext.best_bid`. No tolerance (a tolerance would be an owner-set value). Prevents a fictitious entry from satisfying the side rules: a limit that crosses the book fills near the touch, not at the declared price. | Entry crosses the observed book; required book side (`best_ask` for BUY, `best_bid` for SELL) missing or non-positive ("book reference missing"); `entry_price` missing, non-numeric, or non-positive |
+
+`entry_price` is read from `entry_conditions.entry_price` / `entry_conditions.price` / `sizing.entry_price` / `sizing.price` (same lookup as `RP-STOP-LOSS-MAX-DISTANCE`). Whether a stop/target is *required* remains governed by `RP-STOP-LOSS-REQUIRED` / `RP-TAKE-PROFIT-POLICY`.
+
 ## 4. Decision output contract
 
 ```text
