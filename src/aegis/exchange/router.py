@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from aegis.exchange.errors import ExchangeError
+from aegis.exchange.errors import ExchangeError, ExchangeRejectError
 from aegis.exchange.futures_client import ToobitFuturesExecutionClient
 from aegis.exchange.spot_client import ToobitSpotExecutionClient
 from aegis.schemas.common import MarketType
@@ -10,13 +10,17 @@ from aegis.schemas.orders import Order, OrderIntent
 
 
 class ToobitExecutionRouter:
-    """ExecutionPort that selects Spot vs Futures by market type."""
+    """ExecutionPort that selects Spot vs Futures by market type.
+
+    ``futures=None`` disables Futures (e.g. Spot orderTest mode: no verified
+    Futures orderTest exists); Futures intents are then refused before any I/O.
+    """
 
     def __init__(
         self,
         *,
         spot: ToobitSpotExecutionClient,
-        futures: ToobitFuturesExecutionClient,
+        futures: ToobitFuturesExecutionClient | None,
     ) -> None:
         self._spot = spot
         self._futures = futures
@@ -28,7 +32,7 @@ class ToobitExecutionRouter:
         # Prefer whichever client knows the intent; Spot first then Futures.
         if client_order_id in self._spot._intents or client_order_id in self._spot._orders:
             return self._spot.cancel(client_order_id)
-        if (
+        if self._futures is not None and (
             client_order_id in self._futures._intents
             or client_order_id in self._futures._orders
         ):
@@ -40,14 +44,14 @@ class ToobitExecutionRouter:
     def get_order(self, client_order_id: str) -> Order | None:
         if client_order_id in self._spot._intents or client_order_id in self._spot._orders:
             return self._spot.get_order(client_order_id)
-        if (
+        if self._futures is not None and (
             client_order_id in self._futures._intents
             or client_order_id in self._futures._orders
         ):
             return self._futures.get_order(client_order_id)
         # Ambiguous restart: try spot then futures
         order = self._spot.get_order(client_order_id)
-        if order is not None:
+        if order is not None or self._futures is None:
             return order
         return self._futures.get_order(client_order_id)
 
@@ -57,7 +61,8 @@ class ToobitExecutionRouter:
 
     def close(self) -> None:
         self._spot.close()
-        self._futures.close()
+        if self._futures is not None:
+            self._futures.close()
 
     def _client_for(
         self, market_type: MarketType
@@ -65,5 +70,9 @@ class ToobitExecutionRouter:
         if market_type == MarketType.SPOT:
             return self._spot
         if market_type == MarketType.FUTURES:
+            if self._futures is None:
+                raise ExchangeRejectError(
+                    "futures execution disabled for this router (order-test mode)"
+                )
             return self._futures
         raise ExchangeError(f"unsupported market_type={market_type!r}")

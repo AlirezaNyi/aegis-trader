@@ -27,6 +27,8 @@ class OrderStatus(StrEnum):
     UNKNOWN = "unknown"
     MISSING = "missing"
     FAILED_TERMINAL = "failed_terminal"
+    # Spot orderTest validated the request; nothing reached the matching engine.
+    TEST_ACCEPTED = "test_accepted"
 
 
 class OrderIntent(ApiModel):

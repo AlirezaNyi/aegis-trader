@@ -11,7 +11,16 @@ from uuid import uuid4
 
 import httpx
 
-from aegis.exchange.errors import AmbiguousSubmitError, ExchangeError, RateLimitError
+from aegis.exchange.errors import (
+    AMBIGUOUS_SUBMIT_ERROR_CODES as AMBIGUOUS_SUBMIT_ERROR_CODES,  # re-export
+)
+from aegis.exchange.errors import (
+    AmbiguousSubmitError,
+    ExchangeError,
+    ExchangeRejectError,
+    RateLimitedSubmitError,
+    RateLimitError,
+)
 from aegis.exchange.paths import (
     VERIFIED_QUERY_PATHS,
     VERIFIED_SUBMIT_PATHS,
@@ -40,6 +49,105 @@ _AMBIGUOUS_TRANSPORT = (
 )
 
 
+NO_SUCH_ORDER_CODE = -2013
+_MSG_MAX = 200
+
+
+def _sanitize_msg(raw: Any) -> str | None:
+    if raw is None:
+        return None
+    text = "".join(ch for ch in str(raw) if ch.isprintable())
+    return text[:_MSG_MAX]
+
+
+def parse_error_code(
+    payload: Any,
+    *,
+    success_codes: frozenset[int] = frozenset({0}),
+) -> tuple[bool, int | None, str | None]:
+    """Return ``(is_error, code, msg)`` for an exchange JSON body.
+
+    Toobit error bodies are ``{"code": <negative int>, "msg": "..."}`` (spot error
+    codes page). Successful single-order Spot responses carry no ``code`` key.
+    A ``code`` that is present but not a success code is an error; an unparseable
+    ``code`` is an error with ``code=None``.
+    """
+    if not isinstance(payload, dict) or "code" not in payload:
+        return False, None, None
+    raw = payload.get("code")
+    msg = _sanitize_msg(payload.get("msg"))
+    try:
+        code = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return True, None, msg
+    if code in success_codes:
+        return False, code, msg
+    return True, code, msg
+
+
+def classify_submit_response(
+    response: httpx.Response,
+    *,
+    client_order_id: str,
+    success_codes: frozenset[int] = frozenset({0}),
+) -> dict[str, Any]:
+    """Return the JSON object of an accepted submit, or raise a typed error.
+
+    Only a *parseable* Toobit error ``code`` that is not execution-unknown is a
+    definitive reject. Everything else that is not a clean 2xx object is AMBIGUOUS
+    (the caller marks UNKNOWN and reconciles via ``get_order``; never blind-retry):
+
+    * 5xx / 429 — ``AmbiguousSubmitError`` / ``RateLimitedSubmitError``.
+    * body ``code`` in ``AMBIGUOUS_SUBMIT_ERROR_CODES`` → ``AmbiguousSubmitError``.
+    * body ``code`` present but unparseable (any HTTP status) → ``AmbiguousSubmitError``.
+    * non-2xx without a parseable Toobit ``{code,msg}`` body → ``AmbiguousSubmitError``.
+    * 2xx with a non-JSON / non-object body → ``AmbiguousSubmitError``.
+    * any other parseable error ``code`` (HTTP 2xx or 4xx) → ``ExchangeRejectError``.
+    """
+    status = response.status_code
+    if status >= 500:
+        raise_if_ambiguous_submit(response, client_order_id=client_order_id)
+    if status == 429:
+        raise_rate_limited_submit(response, client_order_id=client_order_id)
+    try:
+        payload: Any = response.json()
+    except ValueError:
+        payload = None
+    is_error, code, msg = parse_error_code(payload, success_codes=success_codes)
+    if is_error:
+        if code is None:
+            raise AmbiguousSubmitError(
+                f"submit HTTP {status} with unparseable error code "
+                f"client_order_id={client_order_id!r}",
+                client_order_id=client_order_id,
+            )
+        if code in AMBIGUOUS_SUBMIT_ERROR_CODES:
+            raise AmbiguousSubmitError(
+                f"submit returned execution-unknown code={code} "
+                f"client_order_id={client_order_id!r}",
+                client_order_id=client_order_id,
+            )
+        raise ExchangeRejectError(
+            f"submit rejected HTTP {status} code={code} client_order_id={client_order_id!r}",
+            client_order_id=client_order_id,
+            http_status=status,
+            code=code,
+            msg=msg,
+        )
+    if not 200 <= status < 300:
+        raise AmbiguousSubmitError(
+            f"submit HTTP {status} without parseable error code "
+            f"client_order_id={client_order_id!r}",
+            client_order_id=client_order_id,
+        )
+    if not isinstance(payload, dict):
+        raise AmbiguousSubmitError(
+            f"submit HTTP {status} with non-object body client_order_id={client_order_id!r}",
+            client_order_id=client_order_id,
+        )
+    return payload
+
+
 def _assert_path_allowed(path: str) -> None:
     assert_withdraw_forbidden(path)
     if path == WITHDRAW_PATH or path not in _ALLOWED_PATHS:
@@ -57,13 +165,29 @@ def _header_api_key(api_key: str) -> dict[str, str]:
 def raise_for_rate_limit(response: httpx.Response) -> None:
     if response.status_code != 429:
         return
-    reset_raw = response.headers.get("X-Api-Limit-Reset-Timestamp")
-    reset_ms: int | None = None
-    if reset_raw is not None and str(reset_raw).strip().isdigit():
-        reset_ms = int(reset_raw)
     raise RateLimitError(
         "Toobit rate limit HTTP 429",
-        reset_timestamp_ms=reset_ms,
+        reset_timestamp_ms=_reset_timestamp_ms(response),
+    )
+
+
+def _reset_timestamp_ms(response: httpx.Response) -> int | None:
+    reset_raw = response.headers.get("X-Api-Limit-Reset-Timestamp")
+    if reset_raw is not None and str(reset_raw).strip().isdigit():
+        return int(str(reset_raw).strip())
+    return None
+
+
+def raise_rate_limited_submit(
+    response: httpx.Response, *, client_order_id: str
+) -> None:
+    """HTTP 429 on a submit → ``RateLimitedSubmitError`` (ambiguous; reconcile)."""
+    if response.status_code != 429:
+        return
+    raise RateLimitedSubmitError(
+        f"submit HTTP 429 (status unknown) for client_order_id={client_order_id!r}",
+        client_order_id=client_order_id,
+        reset_timestamp_ms=_reset_timestamp_ms(response),
     )
 
 
@@ -112,9 +236,11 @@ def signed_form_request(
         if client_order_id is not None:
             raise_if_ambiguous_submit(None, client_order_id=client_order_id, exc=exc)
         raise
-    raise_for_rate_limit(response)
-    if client_order_id is not None and response.status_code >= 500:
+    if client_order_id is not None:
+        # Submit: 429 / 5xx never mean "not accepted" — ambiguous, reconcile.
+        raise_rate_limited_submit(response, client_order_id=client_order_id)
         raise_if_ambiguous_submit(response, client_order_id=client_order_id)
+    raise_for_rate_limit(response)
     return response
 
 
@@ -150,9 +276,11 @@ def signed_v2_json_post(
         if client_order_id is not None:
             raise_if_ambiguous_submit(None, client_order_id=client_order_id, exc=exc)
         raise
-    raise_for_rate_limit(response)
-    if client_order_id is not None and response.status_code >= 500:
+    if client_order_id is not None:
+        # Submit: 429 / 5xx never mean "not accepted" — ambiguous, reconcile.
+        raise_rate_limited_submit(response, client_order_id=client_order_id)
         raise_if_ambiguous_submit(response, client_order_id=client_order_id)
+    raise_for_rate_limit(response)
     return response
 
 
@@ -195,8 +323,9 @@ def order_from_exchange_payload(
     if "data" in payload and isinstance(payload["data"], dict):
         data = payload["data"]
 
-    status_raw = str(data.get("status", "NEW"))
-    status = map_exchange_status(status_raw)
+    # Missing status is never assumed NEW: map to UNKNOWN so the manager reconciles.
+    status_raw = data.get("status")
+    status = map_exchange_status(None if status_raw is None else str(status_raw))
     filled_raw = data.get("executedQty", data.get("executed_qty", "0"))
     qty_raw = data.get("origQty", data.get("quantity", intent.quantity))
     price_raw = data.get("price", intent.price)
@@ -235,7 +364,10 @@ def merge_query_into_order(
     data = payload
     if "data" in payload and isinstance(payload["data"], dict):
         data = payload["data"]
-    status = map_exchange_status(str(data.get("status", existing.status.value.upper())))
+    status_raw = data.get("status")
+    status = (
+        existing.status if status_raw is None else map_exchange_status(str(status_raw))
+    )
     filled_raw = data.get("executedQty", existing.filled_quantity)
     exchange_order_id = data.get("orderId", existing.exchange_order_id)
     if exchange_order_id is not None:

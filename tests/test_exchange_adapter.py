@@ -13,7 +13,7 @@ import pytest
 
 import aegis.exchange as exchange
 from aegis.config.settings import Settings, TradingMode, clear_settings_cache
-from aegis.exchange.errors import AmbiguousSubmitError, RateLimitError
+from aegis.exchange.errors import AmbiguousSubmitError, RateLimitedSubmitError
 from aegis.exchange.factory import build_execution_port
 from aegis.exchange.futures_client import ToobitFuturesExecutionClient
 from aegis.exchange.signing import build_query_string, sign_params, sign_v2_json
@@ -225,8 +225,10 @@ def test_http_429_rate_limit_header() -> None:
     client = ToobitSpotExecutionClient(
         api_key=API_KEY, api_secret=SECRET, client=http
     )
-    with pytest.raises(RateLimitError) as exc:
+    # 429 on submit is ambiguous (status unknown → reconcile), not a reject.
+    with pytest.raises(RateLimitedSubmitError) as exc:
         client.submit(_intent())
+    assert isinstance(exc.value, AmbiguousSubmitError)
     assert exc.value.reset_timestamp_ms == 1_700_000_005_000
 
 

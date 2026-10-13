@@ -17,12 +17,17 @@ def build_execution_port(
     settings: Settings,
     *,
     client: httpx.Client | None = None,
+    use_order_test: bool = False,
 ) -> ExecutionPort:
     """Return live router only when live_execution_permitted and credentials exist.
 
     create_app must not construct a live submit client by default in Phase 7 —
     callers (parent wiring) decide when to invoke this factory. Default path is
     NullExecutionPort.
+
+    ``use_order_test=True`` builds a Spot client that only calls
+    ``POST /api/v1/spot/orderTest`` (validation, no matching engine) and disables
+    Futures (no verified Futures orderTest). It does not relax any live gate.
     """
     if not live_execution_permitted(settings):
         return NullExecutionPort()
@@ -37,7 +42,10 @@ def build_execution_port(
         base_url=REST_BASE_URL,
         recv_window_ms=settings.exchange_recv_window_ms,
         timeout_seconds=settings.exchange_timeout_seconds,
+        use_order_test=use_order_test,
     )
+    if use_order_test:
+        return ToobitExecutionRouter(spot=spot, futures=None)
     futures = ToobitFuturesExecutionClient(
         api_key=settings.toobit_api_key,
         api_secret=settings.toobit_api_secret,

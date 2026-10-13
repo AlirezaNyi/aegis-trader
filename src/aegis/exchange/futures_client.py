@@ -13,7 +13,7 @@ from aegis.exchange._http import (
     signed_v2_json_post,
     signed_v2_query,
 )
-from aegis.exchange.errors import ExchangeError
+from aegis.exchange.errors import AmbiguousSubmitError, ExchangeError
 from aegis.exchange.paths import REST_BASE_URL, VERIFIED_QUERY_PATHS, VERIFIED_SUBMIT_PATHS
 from aegis.exchange.side_map import futures_side_and_position
 from aegis.schemas.common import MarketType
@@ -90,20 +90,36 @@ class ToobitFuturesExecutionClient:
             category=self._category,
             client_order_id=intent.client_order_id,
         )
-        if response.status_code >= 400:
-            raise ExchangeError(
-                f"futures submit HTTP {response.status_code} "
-                f"client_order_id={intent.client_order_id!r}"
+        # Futures v2 error-code semantics are not verified (only the Spot error-code
+        # table is), so no futures error is treated as a definitive reject: every
+        # non-success response is AMBIGUOUS → UNKNOWN + reconcile via get_order.
+        # 429 / 5xx / transport are already raised as ambiguous by the helper.
+        coid = intent.client_order_id
+        if response.status_code >= 300:
+            raise AmbiguousSubmitError(
+                f"futures submit HTTP {response.status_code} (status unknown) "
+                f"client_order_id={coid!r}",
+                client_order_id=coid,
             )
-        payload = response.json()
+        try:
+            payload: Any = response.json()
+        except ValueError as exc:
+            raise AmbiguousSubmitError(
+                f"futures submit non-JSON body client_order_id={coid!r}",
+                client_order_id=coid,
+            ) from exc
         if not isinstance(payload, dict):
-            raise ExchangeError("futures submit response must be an object")
+            raise AmbiguousSubmitError(
+                f"futures submit non-object body client_order_id={coid!r}",
+                client_order_id=coid,
+            )
         if payload.get("code") not in (200, "200", None) and "data" not in payload:
             # Allow flat payloads in mocks; require success code when present without data
             if "status" not in payload and payload.get("code") not in (0, "0"):
-                raise ExchangeError(
-                    f"futures submit rejected code={payload.get('code')!r} "
-                    f"client_order_id={intent.client_order_id!r}"
+                raise AmbiguousSubmitError(
+                    f"futures submit error code={payload.get('code')!r} "
+                    f"(unverified semantics; status unknown) client_order_id={coid!r}",
+                    client_order_id=coid,
                 )
         order = order_from_exchange_payload(payload, intent)
         self._orders[intent.client_order_id] = order

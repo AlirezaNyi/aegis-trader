@@ -11,6 +11,7 @@ TERMINAL_STATUSES: frozenset[OrderStatus] = frozenset(
         OrderStatus.REJECTED,
         OrderStatus.FAILED_TERMINAL,
         OrderStatus.MISSING,
+        OrderStatus.TEST_ACCEPTED,
     }
 )
 
@@ -28,6 +29,7 @@ SUBMIT_ATTEMPTED_STATUSES: frozenset[OrderStatus] = frozenset(
         OrderStatus.UNKNOWN,
         OrderStatus.MISSING,
         OrderStatus.FAILED_TERMINAL,
+        OrderStatus.TEST_ACCEPTED,
     }
 )
 

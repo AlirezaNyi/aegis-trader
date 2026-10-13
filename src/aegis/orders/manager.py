@@ -7,9 +7,15 @@ from decimal import Decimal
 from uuid import uuid4
 
 from aegis.config.settings import Settings
-from aegis.exchange.errors import AmbiguousSubmitError
+from aegis.exchange.errors import (
+    AmbiguousSubmitError,
+    ExchangeRejectError,
+    RateLimitError,
+    is_definitive_submit_reject,
+)
 from aegis.guards.live import assert_live_execution_allowed, trading_ready
 from aegis.interfaces.execution import ExecutionPort
+from aegis.logging import get_logger
 from aegis.orders.idempotency import (
     IdempotencyError,
     SubmitAttemptTracker,
@@ -20,6 +26,8 @@ from aegis.risk.handoff import assert_may_submit_to_order_manager
 from aegis.schemas.common import LedgerKind
 from aegis.schemas.orders import Order, OrderIntent, OrderStatus
 from aegis.schemas.risk import RiskDecision
+
+logger = get_logger("aegis.orders.manager")
 
 
 class OrderManagerError(RuntimeError):
@@ -131,44 +139,98 @@ class OrderManager:
         try:
             order = self._execution.submit(intent)
         except AmbiguousSubmitError:
-            unknown = placeholder.model_copy(
-                update={"status": OrderStatus.UNKNOWN, "updated_at": clock}
+            # INV-04: timeout / 5xx / 429 / bodyless 4xx / execution-unknown or
+            # unparseable code → UNKNOWN → reconcile.
+            return self._mark_unknown_and_reconcile(placeholder, clock)
+        except RateLimitError as exc:
+            # HTTP 429 on submit does not prove the order was refused: ambiguous.
+            self._log_ambiguous_submit(intent.client_order_id, exc)
+            return self._mark_unknown_and_reconcile(placeholder, clock)
+        except ExchangeRejectError as exc:
+            if not is_definitive_submit_reject(exc):
+                # e.g. 4xx without a parseable Toobit code: never assume not-on-book.
+                self._log_ambiguous_submit(intent.client_order_id, exc)
+                return self._mark_unknown_and_reconcile(placeholder, clock)
+            # Definitive reject (parseable non-ambiguous exchange code, or a local
+            # pre-submit guard): not on the book. Terminal REJECTED; does not block
+            # later submits and is never retried automatically.
+            rejected = placeholder.model_copy(
+                update={"status": OrderStatus.REJECTED, "updated_at": clock}
             )
-            self._orders[intent.client_order_id] = unknown
-            self._critical_unknown = True
-            self._block_new_submits = True
-            if self._reconciler is not None:
-                query = getattr(self._reconciler, "query_and_update", None)
-                if callable(query):
-                    query(self, intent.client_order_id, now=clock)
-            # Never second submit — return current local state
-            return self._orders[intent.client_order_id]
+            self._orders[intent.client_order_id] = rejected
+            logger.warning(
+                "live_submit_rejected client_order_id=%s err=%s code=%s http=%s",
+                intent.client_order_id,
+                type(exc).__name__,
+                exc.code,
+                exc.http_status,
+                extra={"event": "live_submit_rejected", "component": "order_manager"},
+            )
+            return rejected
         except Exception:
-            # Any post-attempt failure is treated as ambiguous capital risk.
-            unknown = placeholder.model_copy(
-                update={"status": OrderStatus.UNKNOWN, "updated_at": clock}
-            )
-            self._orders[intent.client_order_id] = unknown
-            self._critical_unknown = True
-            self._block_new_submits = True
-            if self._reconciler is not None:
-                query = getattr(self._reconciler, "query_and_update", None)
-                if callable(query):
-                    query(self, intent.client_order_id, now=clock)
-            return self._orders[intent.client_order_id]
+            # Any other post-attempt failure is treated as ambiguous capital risk.
+            return self._mark_unknown_and_reconcile(placeholder, clock)
 
         if order.ledger_kind != LedgerKind.LIVE:
             raise OrderManagerError(
                 f"execution returned non-live ledger_kind={order.ledger_kind.value!r}"
             )
         self._orders[intent.client_order_id] = order
+        if order.status == OrderStatus.UNKNOWN:
+            # Ack without a recognised status: treat like an ambiguous submit.
+            return self._mark_unknown_and_reconcile(order, clock)
         return order
+
+    @staticmethod
+    def _log_ambiguous_submit(client_order_id: str, exc: Exception) -> None:
+        logger.warning(
+            "live_submit_ambiguous client_order_id=%s err=%s code=%s http=%s",
+            client_order_id,
+            type(exc).__name__,
+            getattr(exc, "code", None),
+            getattr(exc, "http_status", None),
+            extra={"event": "live_submit_ambiguous", "component": "order_manager"},
+        )
+
+    def _mark_unknown_and_reconcile(self, base: Order, clock: datetime) -> Order:
+        client_order_id = base.client_order_id
+        self._orders[client_order_id] = base.model_copy(
+            update={"status": OrderStatus.UNKNOWN, "updated_at": clock}
+        )
+        self._critical_unknown = True
+        self._block_new_submits = True
+        if self._reconciler is not None:
+            query = getattr(self._reconciler, "query_and_update", None)
+            if callable(query):
+                try:
+                    query(self, client_order_id, now=clock)
+                except Exception as exc:  # noqa: BLE001 — reconcile failure stays UNKNOWN
+                    logger.warning(
+                        "reconcile_after_submit_failed client_order_id=%s err=%s",
+                        client_order_id,
+                        type(exc).__name__,
+                        extra={
+                            "event": "reconcile_after_submit_failed",
+                            "component": "order_manager",
+                        },
+                    )
+                    current = self._orders.get(client_order_id)
+                    if current is None or current.status != OrderStatus.UNKNOWN:
+                        self._orders[client_order_id] = base.model_copy(
+                            update={"status": OrderStatus.UNKNOWN, "updated_at": clock}
+                        )
+                    self._critical_unknown = True
+                    self._block_new_submits = True
+        # Never second submit — return current local state
+        return self._orders[client_order_id]
 
     def cancel(self, client_order_id: str, *, now: datetime | None = None) -> Order:
         clock = now if now is not None else datetime.now(tz=UTC)
         order = self._execution.cancel(client_order_id)
         updated = order.model_copy(update={"updated_at": clock})
         self._orders[client_order_id] = updated
+        # An UNKNOWN (or MISSING) cancel ack must block new submits until reconciled.
+        self._recompute_critical_flags()
         return updated
 
     def apply_exchange_order(

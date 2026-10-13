@@ -24,10 +24,23 @@ def _dec_str(value: Decimal | None) -> str | None:
     return str(value)
 
 
+class TestOrderPersistError(RuntimeError):
+    """Raised when a ``TEST_ACCEPTED`` (Spot orderTest) order is offered to the live
+    ledger. orderTest never creates an exchange order, so it must never appear in
+    live persistence (it would look like a real live order after restart)."""
+
+    __test__ = False  # not a pytest test class
+
+
 def upsert_live_order(session: Session, order: Order) -> None:
     if order.ledger_kind != LedgerKind.LIVE:
         raise LiveLedgerKindError(
             f"live persist refuses ledger_kind={order.ledger_kind.value!r}"
+        )
+    if order.status == OrderStatus.TEST_ACCEPTED:
+        raise TestOrderPersistError(
+            "live persist refuses status='test_accepted' "
+            f"client_order_id={order.client_order_id!r} (orderTest is not a live order)"
         )
     row = session.scalars(
         select(OrderRow).where(
