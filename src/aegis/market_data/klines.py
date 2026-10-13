@@ -33,12 +33,18 @@ def parse_rest_kline_row(
         low = Decimal(str(row[3]))
         close = Decimal(str(row[4]))
         volume = Decimal(str(row[5]))
-        if len(row) >= 7 and row[6] is not None:
-            close_time = ms_to_datetime(row[6])
+        open_ms = int(row[0])
+        derived_close_ms = open_ms + interval_to_milliseconds(interval.value) - 1
+        # Toobit has been observed (2026-10-13) returning 0 at index 6 for spot
+        # klines. A close at/before open is impossible; derive it from the interval
+        # so in-progress bars are never mistaken for final ones.
+        exchange_close_ms = (
+            int(row[6]) if len(row) >= 7 and row[6] is not None else None
+        )
+        if exchange_close_ms is not None and exchange_close_ms > open_ms:
+            close_time = ms_to_datetime(exchange_close_ms)
         else:
-            close_time = ms_to_datetime(
-                int(row[0]) + interval_to_milliseconds(interval.value) - 1
-            )
+            close_time = ms_to_datetime(derived_close_ms)
         quote_volume = Decimal(str(row[7])) if len(row) >= 8 and row[7] is not None else None
         trade_count = int(row[8]) if len(row) >= 9 and row[8] is not None else None
     except (TypeError, ValueError, ArithmeticError) as exc:

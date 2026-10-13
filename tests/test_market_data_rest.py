@@ -194,3 +194,23 @@ def test_malformed_kline_raises() -> None:
     instrument = InstrumentRef(market_type=MarketType.SPOT, symbol="ETHUSDT")
     with pytest.raises(MalformedKlineError):
         rest.get_klines(instrument, Timeframe.M1, limit=1)
+
+
+def test_kline_zero_close_time_is_derived_and_in_progress_bar_not_final() -> None:
+    """Toobit returned 0 at index 6 (observed 2026-10-13); never treat that as final."""
+    from aegis.market_data.klines import parse_rest_kline_row
+
+    open_ms = 1791916200000  # 2026-10-13T18:30:00Z
+    row = [open_ms, "0.2356", "0.2361", "0.2354", "0.2356", "66875.2", 0, "15758.4", 41]
+    instrument = InstrumentRef(market_type=MarketType.SPOT, symbol="ADAUSDT")
+    mid_bar = datetime(2026, 10, 13, 18, 33, tzinfo=UTC)
+    candle = parse_rest_kline_row(
+        row, instrument=instrument, interval=Timeframe.M5, received_at=mid_bar, now=mid_bar
+    )
+    assert candle.close_time == datetime(2026, 10, 13, 18, 34, 59, 999000, tzinfo=UTC)
+    assert candle.is_final is False
+    after = datetime(2026, 10, 13, 18, 35, 1, tzinfo=UTC)
+    final = parse_rest_kline_row(
+        row, instrument=instrument, interval=Timeframe.M5, received_at=after, now=after
+    )
+    assert final.is_final is True
