@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from aegis.config.settings import Settings
 from aegis.interfaces.llm import LlmPort, UnavailableLlmPort
-from aegis.supervisor.budgets import BudgetConfig, budgets_allow_call
+from aegis.supervisor.budgets import BudgetConfig, DailyCallLimiter, budgets_allow_call
 from aegis.supervisor.openai_compat import (
     SUPPORTED_PROVIDERS,
     OpenAICompatLlmPort,
@@ -56,6 +56,14 @@ def build_llm_port(settings: Settings) -> LlmPort:
         timeout_seconds=settings.supervisor_timeout_seconds,
         extra_headers=extra_headers or None,
     )
+
+
+def build_call_limiter(settings: Settings) -> DailyCallLimiter | None:
+    """Owner-set daily LLM call cap; ``None`` when unset (no cap)."""
+    cap = settings.llm_daily_call_cap
+    if cap is None:
+        return None
+    return DailyCallLimiter(cap)
 
 
 def supervisor_may_call_llm(settings: Settings) -> bool:

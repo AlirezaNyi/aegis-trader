@@ -22,6 +22,16 @@
 * `AEGIS_LLM_COST_BUDGET=0` is allowed for free tiers; adapter always reports `_meta.cost` (0 when upstream omits cost).
 * Token and latency budgets must still be **> 0** when set.
 * When budgets are set, LLM `_meta` must include token and cost usage; missing usage → NO_TRADE.
+* Optional owner-set `AEGIS_LLM_DAILY_CALL_CAP` (empty = no cap; must be > 0 when set; no default
+  value is chosen by engineering). `factory.build_call_limiter` returns an in-process
+  `DailyCallLimiter`; once the cap is hit for the current UTC day, `supervise()` returns NO_TRADE
+  with reason `llm_daily_call_cap_reached` and makes **no network call**. The cap is checked only
+  after pre-LLM gates, budgets, and provider checks pass, so gate-rejected cycles do not consume it.
+  Counter is in-memory only: it resets on process restart and is not shared across processes.
+  The parent (pipeline/main) must wire the limiter; the default `call_limiter=None` keeps prior behaviour.
+* HTTP 429 from the provider raises `LlmRateLimitedError` (message `LLM HTTP 429`, no body, no retry)
+  and `supervise()` returns NO_TRADE with reason `llm_rate_limited` (distinct from `llm_call_failed`).
+  No backoff/cool-down is implemented; the next cycle will call again unless the cap blocks it.
 * Evidence dumped into prompts is scrubbed with the same credential redactor as the Jev adapter.
 * API keys are never logged; HTTP error messages omit response bodies.
 

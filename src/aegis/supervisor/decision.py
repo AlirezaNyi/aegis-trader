@@ -61,6 +61,9 @@ class ProposalDefaults:
     entry_conditions: Mapping[str, Any] = field(default_factory=dict)
     sizing: Mapping[str, Any] = field(default_factory=dict)
     ttl: timedelta = timedelta(minutes=5)
+    # Approved max stop distance in percent, shown to the LLM as a hint only;
+    # the Risk Engine still enforces it.
+    max_stop_distance_pct: Decimal | None = None
 
 
 def is_compact_decision(payload: Any) -> bool:

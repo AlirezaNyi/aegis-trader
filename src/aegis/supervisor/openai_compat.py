@@ -24,6 +24,10 @@ DEFAULT_BASE_URLS: dict[str, str] = {
 SUPPORTED_PROVIDERS = frozenset(DEFAULT_BASE_URLS)
 
 
+class LlmRateLimitedError(RuntimeError):
+    """Provider returned HTTP 429 (rate limit / quota). Never retried here."""
+
+
 def resolve_base_url(provider: str, override: str | None = None) -> str:
     """Return chat-completions base URL (no trailing slash on path root)."""
     if override is not None and override.strip():
@@ -177,6 +181,9 @@ class OpenAICompatLlmPort:
             msg = f"LLM transport error: {type(exc).__name__}"
             raise RuntimeError(msg) from exc
 
+        if response.status_code == 429:
+            # Provider quota / rate limit: no body, no retry (caller fails closed).
+            raise LlmRateLimitedError("LLM HTTP 429")
         if response.status_code >= 400:
             msg = f"LLM HTTP {response.status_code}"
             raise RuntimeError(msg)

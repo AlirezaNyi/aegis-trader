@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from typing import Any
 
 from aegis.jev.redact import redact_evidence_package
@@ -14,7 +15,12 @@ def _safe_dump(value: Any) -> str:
     return json.dumps(value, default=str, ensure_ascii=False)
 
 
-def build_supervisor_prompt(package: EvidencePackage, jev_result: JevResult) -> str:
+def build_supervisor_prompt(
+    package: EvidencePackage,
+    jev_result: JevResult,
+    *,
+    max_stop_distance_pct: Decimal | None = None,
+) -> str:
     """Assemble a prompt that fences untrusted external content.
 
     Evidence is redacted with the same credential scrubber used by the Jev adapter
@@ -45,6 +51,19 @@ def build_supervisor_prompt(package: EvidencePackage, jev_result: JevResult) -> 
             ),
             "- take_profit: optional decimal string, or null.",
             "- rationale, invalidation, confidence_note: short plain-text strings.",
+            (
+                "Set entry_price and stop_loss relative to EvidencePackage.market_context "
+                "(last_close, recent_high, recent_low, atr_14). If market_context is null, "
+                "return NO_TRADE."
+            ),
+            *(
+                [
+                    f"The stop_loss must be within {max_stop_distance_pct}% of entry_price "
+                    "(owner-approved limit enforced by the Risk Engine)."
+                ]
+                if max_stop_distance_pct is not None
+                else []
+            ),
             (
                 "Do not output size, notional, leverage, order type, or expiry; "
                 "deterministic code and the Risk Engine own those."

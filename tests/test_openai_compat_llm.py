@@ -12,8 +12,9 @@ import pytest
 from aegis.config.settings import Settings, TradingMode, clear_settings_cache
 from aegis.interfaces.llm import UnavailableLlmPort
 from aegis.supervisor.budgets import BudgetConfig, budgets_allow_call
-from aegis.supervisor.factory import build_llm_port
+from aegis.supervisor.factory import build_call_limiter, build_llm_port
 from aegis.supervisor.openai_compat import (
+    LlmRateLimitedError,
     OpenAICompatLlmPort,
     resolve_base_url,
 )
@@ -286,3 +287,56 @@ def test_settings_allows_zero_cost_budget() -> None:
             require_database=False,
             llm_cost_budget=Decimal("-1"),
         )
+
+
+def test_http_429_raises_rate_limited_without_body_or_retry() -> None:
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(429, text="quota exceeded secret=should-not-leak")
+
+    port = OpenAICompatLlmPort(
+        api_key="super-secret-key",
+        model="m",
+        base_url="https://openrouter.ai/api/v1",
+        provider="openrouter",
+        http_client=_mock_transport(handler),
+    )
+    try:
+        with pytest.raises(LlmRateLimitedError) as exc_info:
+            port.complete_structured(
+                prompt="x", schema_name="SupervisorDecision", timeout_seconds=5.0
+            )
+    finally:
+        port.close()
+    assert str(exc_info.value) == "LLM HTTP 429"
+    assert isinstance(exc_info.value, RuntimeError)
+    assert calls["n"] == 1
+
+
+def test_settings_daily_call_cap_validation_and_limiter() -> None:
+    clear_settings_cache()
+    unset = Settings(trading_mode=TradingMode.PAPER, require_database=False)
+    assert unset.llm_daily_call_cap is None
+    assert build_call_limiter(unset) is None
+
+    empty = Settings(
+        trading_mode=TradingMode.PAPER, require_database=False, llm_daily_call_cap=""
+    )
+    assert empty.llm_daily_call_cap is None
+
+    capped = Settings(
+        trading_mode=TradingMode.PAPER, require_database=False, llm_daily_call_cap=3
+    )
+    limiter = build_call_limiter(capped)
+    assert limiter is not None
+    assert limiter.max_calls == 3
+
+    for bad in (0, -1):
+        with pytest.raises(ValueError, match="DAILY_CALL_CAP"):
+            Settings(
+                trading_mode=TradingMode.PAPER,
+                require_database=False,
+                llm_daily_call_cap=bad,
+            )

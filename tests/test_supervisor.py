@@ -16,7 +16,8 @@ from aegis.schemas.common import EvidenceStatus, MarketType, Timeframe
 from aegis.schemas.evidence import AnalystEvidence, AnalystType, EvidencePackage, JevResult
 from aegis.schemas.market import InstrumentRef
 from aegis.schemas.proposal import ProposalAction, TradeDirection, TradeProposal
-from aegis.supervisor.budgets import BudgetConfig
+from aegis.supervisor.budgets import BudgetConfig, DailyCallLimiter
+from aegis.supervisor.openai_compat import LlmRateLimitedError
 from aegis.supervisor.prompt import build_supervisor_prompt
 from aegis.supervisor.supervise import supervise
 
@@ -472,3 +473,115 @@ def test_compact_decision_schema_errors_recorded_without_values() -> None:
     errors = result.uncertainty["schema_errors"]
     assert errors and errors[0]["loc"] == ["entry_price"]
     assert "secretish" not in str(result.uncertainty)
+
+
+class RateLimitedLlm:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete_structured(
+        self,
+        *,
+        prompt: str,
+        schema_name: str,
+        timeout_seconds: float,
+    ) -> dict[str, Any]:
+        _ = prompt, schema_name, timeout_seconds
+        self.calls += 1
+        raise LlmRateLimitedError("LLM HTTP 429")
+
+
+def _fixed_clock(when: datetime) -> Any:
+    return lambda: when
+
+
+def test_daily_call_cap_reached_no_trade_without_llm_call() -> None:
+    package = _evidence()
+    jev = _jev()
+    llm = CountingLlm(
+        response=_with_usage_meta(_valid_llm_proposal(package, jev, action="NO_TRADE"))
+    )
+    limiter = DailyCallLimiter(1)
+    clock = _fixed_clock(datetime(2026, 10, 13, 23, 0, tzinfo=UTC))
+    first = supervise(package, jev, llm, budgets=_budgets(), clock=clock, call_limiter=limiter)
+    assert llm.calls == 1
+    assert "llm_daily_call_cap_reached" not in first.uncertainty.get("reasons", [])
+
+    second = supervise(package, jev, llm, budgets=_budgets(), clock=clock, call_limiter=limiter)
+    assert second.action == ProposalAction.NO_TRADE
+    assert second.uncertainty["reasons"] == ["llm_daily_call_cap_reached"]
+    assert llm.calls == 1
+    assert limiter.used == 1
+
+
+def test_daily_call_cap_resets_on_next_utc_day() -> None:
+    package = _evidence()
+    jev = _jev()
+    llm = CountingLlm(
+        response=_with_usage_meta(_valid_llm_proposal(package, jev, action="NO_TRADE"))
+    )
+    limiter = DailyCallLimiter(1)
+    day1 = _fixed_clock(datetime(2026, 10, 13, 23, 59, tzinfo=UTC))
+    day2 = _fixed_clock(datetime(2026, 10, 14, 0, 1, tzinfo=UTC))
+    supervise(package, jev, llm, budgets=_budgets(), clock=day1, call_limiter=limiter)
+    blocked = supervise(package, jev, llm, budgets=_budgets(), clock=day1, call_limiter=limiter)
+    assert blocked.uncertainty["reasons"] == ["llm_daily_call_cap_reached"]
+    assert llm.calls == 1
+    supervise(package, jev, llm, budgets=_budgets(), clock=day2, call_limiter=limiter)
+    assert llm.calls == 2
+
+
+def test_daily_call_limiter_unit() -> None:
+    limiter = DailyCallLimiter(2)
+    now = datetime(2026, 10, 13, 12, 0, tzinfo=UTC)
+    assert limiter.remaining(now) == 2
+    assert limiter.try_acquire(now) is True
+    assert limiter.try_acquire(now) is True
+    assert limiter.try_acquire(now) is False  # denied acquire not counted
+    assert limiter.used == 2
+    assert limiter.remaining(now) == 0
+    assert limiter.remaining(now + timedelta(days=1)) == 2
+    with pytest.raises(ValueError):
+        DailyCallLimiter(0)
+    with pytest.raises(ValueError):
+        limiter.try_acquire(datetime(2026, 10, 13, 12, 0))  # naive
+
+
+def test_gate_rejected_cycle_does_not_consume_cap() -> None:
+    llm = CountingLlm(response={"action": "BUY"})
+    limiter = DailyCallLimiter(1)
+    clock = _fixed_clock(datetime(2026, 10, 13, 12, 0, tzinfo=UTC))
+    gated = supervise(
+        _evidence(include_technical=False),
+        _jev(),
+        llm,
+        budgets=_budgets(),
+        clock=clock,
+        call_limiter=limiter,
+    )
+    assert "missing_technical" in gated.uncertainty["reasons"]
+    no_budget = supervise(
+        _evidence(), _jev(), llm, budgets=None, clock=clock, call_limiter=limiter
+    )
+    assert "supervisor_budgets_not_configured" in no_budget.uncertainty["reasons"]
+    unavailable = supervise(
+        _evidence(),
+        _jev(),
+        UnavailableLlmPort(),
+        budgets=_budgets(),
+        clock=clock,
+        call_limiter=limiter,
+    )
+    assert "llm_provider_unavailable" in unavailable.uncertainty["reasons"]
+    assert llm.calls == 0
+    assert limiter.used == 0
+    assert limiter.remaining(clock()) == 1
+
+
+def test_rate_limited_llm_distinct_reason() -> None:
+    llm = RateLimitedLlm()
+    result = supervise(_evidence(), _jev(), llm, budgets=_budgets())
+    assert result.action == ProposalAction.NO_TRADE
+    assert result.uncertainty["reasons"] == ["llm_rate_limited"]
+    assert "llm_call_failed" not in result.uncertainty["reasons"]
+    assert llm.calls == 1

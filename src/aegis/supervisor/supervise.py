@@ -14,7 +14,7 @@ from pydantic import ValidationError
 from aegis.interfaces.llm import LlmPort, UnavailableLlmPort
 from aegis.schemas.evidence import EvidencePackage, JevResult
 from aegis.schemas.proposal import ProposalAction, TradeDirection, TradeProposal
-from aegis.supervisor.budgets import BudgetConfig, budgets_allow_call
+from aegis.supervisor.budgets import BudgetConfig, DailyCallLimiter, budgets_allow_call
 from aegis.supervisor.decision import (
     ProposalDefaults,
     SupervisorDecision,
@@ -22,6 +22,7 @@ from aegis.supervisor.decision import (
     proposal_from_decision,
 )
 from aegis.supervisor.gates import evaluate_pre_llm_gates
+from aegis.supervisor.openai_compat import LlmRateLimitedError
 from aegis.supervisor.prompt import build_supervisor_prompt
 
 Clock = Callable[[], datetime]
@@ -130,12 +131,16 @@ def supervise(
     strategy_version: str = "0.0.0-phase4",
     clock: Clock | None = None,
     defaults: ProposalDefaults | None = None,
+    call_limiter: DailyCallLimiter | None = None,
 ) -> TradeProposal:
     """Run deterministic gates then optional structured LLM completion.
 
     The LLM may return either a compact ``SupervisorDecision`` (preferred; code
     fills identity, sizing, order params, and expiry from ``defaults``) or a full
     ``TradeProposal`` payload (legacy). Any validation failure is NO_TRADE.
+
+    ``call_limiter`` (optional, owner-set daily cap) is consulted only after all
+    deterministic gates pass, so gate-rejected cycles never consume quota.
     """
     gate_reasons = evaluate_pre_llm_gates(package, jev_result)
     if gate_reasons:
@@ -168,14 +173,39 @@ def supervise(
             clock=clock,
         )
 
+    if call_limiter is not None and not call_limiter.try_acquire((clock or _utcnow)()):
+        return no_trade_proposal(
+            package,
+            jev_result,
+            reasons=["llm_daily_call_cap_reached"],
+            strategy_id=strategy_id,
+            strategy_version=strategy_version,
+            clock=clock,
+            supervisor_model_meta={"daily_call_cap": call_limiter.max_calls},
+        )
+
     assert budgets is not None  # budgets_allow_call already verified
-    prompt = build_supervisor_prompt(package, jev_result)
+    prompt = build_supervisor_prompt(
+        package,
+        jev_result,
+        max_stop_distance_pct=None if defaults is None else defaults.max_stop_distance_pct,
+    )
     started = time.perf_counter()
     try:
         raw = llm.complete_structured(
             prompt=prompt,
             schema_name="SupervisorDecision",
             timeout_seconds=timeout_seconds,
+        )
+    except LlmRateLimitedError as exc:
+        return no_trade_proposal(
+            package,
+            jev_result,
+            reasons=["llm_rate_limited"],
+            strategy_id=strategy_id,
+            strategy_version=strategy_version,
+            clock=clock,
+            supervisor_model_meta={"error": type(exc).__name__},
         )
     except Exception as exc:  # noqa: BLE001 — fail closed on any provider failure
         return no_trade_proposal(
