@@ -32,6 +32,18 @@
 * Jev OK alignment that clearly contradicts shared analyst direction → NO_TRADE.
 * Prompt-injection markers in **any** analyst notes/sources/payload text → NO_TRADE (content treated as untrusted DATA).
 
+## Output contract
+
+* Preferred LLM output is the compact `SupervisorDecision` (`supervisor/decision.py`):
+  action, direction, entry_price, stop_loss, take_profit, rationale, invalidation, confidence_note.
+  Unknown keys are dropped.
+* Code fills identity, `entry_conditions.order_type` / `time_in_force`, `sizing`, and `expires_at`
+  from `ProposalDefaults`. The cycle derives them only from APPROVED policy values
+  (`pipeline/defaults.py`). Missing or ambiguous values stay empty, so Risk rejects.
+* The model never sets notional or leverage on the compact path. HOLD / NO_TRADE are forced flat.
+* Legacy full-`TradeProposal` payloads (with `proposal_id`) are still accepted for tests.
+* Not yet verified against a real provider: how often a given model returns valid compact JSON.
+
 ## Confidence
 
 * Any model-reported confidence is stored under `uncertainty` as **uncalibrated**.

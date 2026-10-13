@@ -31,6 +31,7 @@ from aegis.orders.manager import OrderManager
 from aegis.paper.broker import PaperBroker
 from aegis.paper.ledger import PaperLedger
 from aegis.pipeline.activity import ActivityState
+from aegis.pipeline.audit import DecisionAuditStore
 from aegis.pipeline.cycle import PaperCycleDeps, run_paper_cycle
 from aegis.pipeline.journal import PaperCycleJournal
 from aegis.pipeline.soak import (
@@ -171,6 +172,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     activity = ActivityState()
     app.state.activity = activity
     app.state.paper_journal = PaperCycleJournal(database_url=resolved.database_url)
+    decision_audit = DecisionAuditStore(database_url=resolved.database_url)
+    app.state.decision_audit = decision_audit
     # Paper decision cycle deps — callable on finalized candles only.
     paper_cycle_deps = PaperCycleDeps(
         settings=safe_settings,
@@ -181,6 +184,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         paper_broker=paper_broker,
         analyst_concurrency=resolved.analyst_concurrency,
         activity=activity,
+        audit=decision_audit,
     )
     app.state.paper_cycle_deps = paper_cycle_deps
     app.state.run_paper_cycle = run_paper_cycle

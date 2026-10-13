@@ -17,6 +17,7 @@ from aegis.schemas.evidence import AnalystEvidence, AnalystType, EvidencePackage
 from aegis.schemas.market import InstrumentRef
 from aegis.schemas.proposal import ProposalAction, TradeDirection, TradeProposal
 from aegis.supervisor.budgets import BudgetConfig
+from aegis.supervisor.prompt import build_supervisor_prompt
 from aegis.supervisor.supervise import supervise
 
 SUPERVISOR_ROOT = Path(__file__).resolve().parents[1] / "src" / "aegis" / "supervisor"
@@ -379,3 +380,95 @@ def test_supervisor_does_not_import_exchange_or_orders() -> None:
     for name in imports:
         assert not name.startswith("aegis.exchange")
         assert not name.startswith("aegis.orders")
+
+
+def test_prompt_lists_compact_keys_and_forbids_sizing() -> None:
+    prompt = build_supervisor_prompt(_evidence(), _jev())
+    assert "SupervisorDecision" in prompt
+    assert "entry_price" in prompt and "stop_loss" in prompt
+    assert "Do not output size, notional, leverage" in prompt
+
+
+def test_compact_decision_identity_and_sizing_from_code() -> None:
+    from aegis.supervisor.decision import ProposalDefaults
+
+    llm = CountingLlm(
+        response={
+            "action": "BUY",
+            "direction": "long",
+            "entry_price": "100",
+            "stop_loss": "97",
+            "sizing": {"notional": "99999"},
+            "leverage": "50",
+            "_meta": {"total_tokens": 10, "cost": "0"},
+        }
+    )
+    package = _evidence()
+    defaults = ProposalDefaults(
+        entry_conditions={"order_type": "LIMIT", "time_in_force": "GTC"},
+        sizing={"method": "fixed_notional", "notional": "2"},
+    )
+    result = supervise(package, _jev(), llm, budgets=_budgets(), defaults=defaults)
+    assert llm.calls == 1
+    assert result.action == ProposalAction.BUY
+    assert result.instrument == package.instrument
+    assert result.correlation_id == package.correlation_id
+    assert result.sizing == {"method": "fixed_notional", "notional": "2"}
+    assert result.leverage is None
+    assert result.entry_conditions["entry_price"] == "100"
+    assert str(result.stop_loss) == "97"
+
+
+def test_compact_decision_hold_is_flat_without_sizing() -> None:
+    llm = CountingLlm(
+        response={
+            "action": "HOLD",
+            "direction": "long",
+            "entry_price": "100",
+            "_meta": {"total_tokens": 10, "cost": "0"},
+        }
+    )
+    result = supervise(_evidence(), _jev(), llm, budgets=_budgets())
+    assert result.action == ProposalAction.HOLD
+    assert result.direction == TradeDirection.FLAT
+    assert result.sizing == {}
+    assert result.entry_conditions == {}
+
+
+def test_compact_decision_invalid_action_no_trade() -> None:
+    llm = CountingLlm(
+        response={"action": "YOLO", "_meta": {"total_tokens": 10, "cost": "0"}}
+    )
+    result = supervise(_evidence(), _jev(), llm, budgets=_budgets())
+    assert result.action == ProposalAction.NO_TRADE
+    assert "llm_output_schema_invalid" in result.uncertainty["reasons"]
+
+
+def test_compact_decision_long_text_truncated_not_rejected() -> None:
+    llm = CountingLlm(
+        response={
+            "action": "NO_TRADE",
+            "direction": "flat",
+            "rationale": "x" * 5000,
+            "confidence_note": None,
+            "_meta": {"total_tokens": 10, "cost": "0"},
+        }
+    )
+    result = supervise(_evidence(), _jev(), llm, budgets=_budgets())
+    assert result.action == ProposalAction.NO_TRADE
+    assert len(result.uncertainty["rationale"]) == 2000
+
+
+def test_compact_decision_schema_errors_recorded_without_values() -> None:
+    llm = CountingLlm(
+        response={
+            "action": "BUY",
+            "entry_price": "not-a-number-secretish",
+            "_meta": {"total_tokens": 10, "cost": "0"},
+        }
+    )
+    result = supervise(_evidence(), _jev(), llm, budgets=_budgets())
+    assert result.action == ProposalAction.NO_TRADE
+    errors = result.uncertainty["schema_errors"]
+    assert errors and errors[0]["loc"] == ["entry_price"]
+    assert "secretish" not in str(result.uncertainty)

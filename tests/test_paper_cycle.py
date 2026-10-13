@@ -300,3 +300,83 @@ def test_create_app_wires_paper_cycle_and_null_execution() -> None:
     assert app.state.run_paper_cycle is run_paper_cycle
     with TestClient(app) as client:
         assert client.get("/health").status_code == 200
+
+
+def _compact_buy_payload(*, entry_price: str) -> dict[str, Any]:
+    """What a real LLM returns under the SupervisorDecision contract."""
+    return {
+        "action": "BUY",
+        "direction": "long",
+        "entry_price": entry_price,
+        "stop_loss": str(Decimal(entry_price) * Decimal("0.97")),
+        "take_profit": None,
+        "rationale": "trend up, momentum aligned",
+        "invalidation": "close below stop",
+        "confidence_note": "uncalibrated",
+        # Model-supplied sizing must be ignored; code owns it.
+        "notional": "100000",
+        "_meta": {"total_tokens": 50, "cost": "0.01"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_cycle_compact_decision_approves_with_policy_sizing() -> None:
+    start = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
+    candles = _uptrend_series(45, start)
+    now = candles[-1].received_at + timedelta(milliseconds=100)
+    entry = str(candles[-1].close)
+    llm = CountingLlm(_compact_buy_payload(entry_price=entry))
+    budgets = BudgetConfig(
+        token_budget=2000,
+        cost_budget=Decimal("1.00"),
+        latency_budget_ms=5000,
+    )
+    deps = _deps(llm=llm, budgets=budgets)
+    result = await run_paper_cycle(
+        candles,
+        deps=deps,
+        instrument=_instrument(),
+        timeframe=Timeframe.M1,
+        now=now,
+    )
+    assert result.proposal is not None
+    assert result.proposal.action == ProposalAction.BUY
+    # Sizing and order params come from owner policy v1.0, never the model.
+    assert result.proposal.sizing == {"method": "fixed_notional", "notional": "2"}
+    assert result.proposal.entry_conditions["order_type"] == "LIMIT"
+    assert result.proposal.entry_conditions["time_in_force"] == "GTC"
+    assert result.proposal.expires_at == now + timedelta(milliseconds=30_000)
+    assert result.decision is not None
+    assert result.decision.decision == RiskDecisionType.APPROVE, (
+        result.decision.rejection_reasons
+    )
+    assert result.order is not None
+    assert result.order.ledger_kind == LedgerKind.PAPER
+    assert len(deps.paper_broker.ledger.fills) == 1
+
+
+@pytest.mark.asyncio
+async def test_cycle_compact_decision_without_stop_is_rejected() -> None:
+    start = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
+    candles = _uptrend_series(45, start)
+    now = candles[-1].received_at + timedelta(milliseconds=100)
+    payload = _compact_buy_payload(entry_price=str(candles[-1].close))
+    payload["stop_loss"] = None
+    llm = CountingLlm(payload)
+    budgets = BudgetConfig(
+        token_budget=2000,
+        cost_budget=Decimal("1.00"),
+        latency_budget_ms=5000,
+    )
+    deps = _deps(llm=llm, budgets=budgets)
+    result = await run_paper_cycle(
+        candles,
+        deps=deps,
+        instrument=_instrument(),
+        timeframe=Timeframe.M1,
+        now=now,
+    )
+    assert result.decision is not None
+    assert result.decision.decision == RiskDecisionType.REJECT
+    assert result.order is None
+    assert deps.paper_broker.ledger.fills == []

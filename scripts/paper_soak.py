@@ -38,6 +38,25 @@ from aegis.risk.factory import build_risk_policy_from_settings  # noqa: E402
 from aegis.supervisor.factory import budget_config_from_settings, build_llm_port  # noqa: E402
 
 
+def _jev_line(outcome: object) -> str:
+    """One-line Jev view for operators: status, model, and headline answers."""
+    result = getattr(outcome, "result", None)
+    proposal = None if result is None else result.proposal
+    if proposal is None:
+        return "JEV not_called"
+    jev = proposal.jev_result
+    answers = jev.answers
+    alignment = answers.get("alignment", {})
+    adequacy = answers.get("evidence_adequacy", {})
+    entry = answers.get("long_entry_supported", {})
+    return (
+        f"JEV status={jev.status.value} model={jev.model} "
+        f"alignment={alignment.get('choice')} "
+        f"adequacy={adequacy.get('score')} "
+        f"long_entry_p={entry.get('noul')} latency_ms={jev.latency_ms}"
+    )
+
+
 async def _main(once: bool) -> int:
     clear_settings_cache()
     settings = Settings(
@@ -65,8 +84,11 @@ async def _main(once: bool) -> int:
             timeframe=soak_timeframe_from_settings(settings),
         )
         if once:
-            outcome = await runner.poll_once()
-            print(format_review_text(summarize_soak_outcome(outcome)))
+            await runner.poll_once()
+            for symbol, outcome in runner.last_outcomes_by_symbol.items():
+                print(f"===== {symbol} =====")
+                print(format_review_text(summarize_soak_outcome(outcome)))
+                print(_jev_line(outcome))
             return 0
         gate = ShutdownGate()
         await run_soak_loop(

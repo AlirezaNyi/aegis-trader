@@ -192,6 +192,10 @@ def format_review_text(summary: dict[str, Any]) -> str:
         unc = prop.get("uncertainty") or {}
         if isinstance(unc, dict) and unc.get("reasons"):
             lines.append(f"suggestion_reasons={unc.get('reasons')}")
+        if isinstance(unc, dict) and unc.get("schema_errors"):
+            lines.append(f"llm_schema_errors={unc.get('schema_errors')}")
+        if isinstance(unc, dict) and unc.get("rationale"):
+            lines.append(f"llm_rationale={unc.get('rationale')}")
     else:
         lines.append("SUGGESTION none")
 
@@ -226,6 +230,8 @@ def _owner_hint(result: PaperCycleResult) -> str:
     action = result.proposal.action.value
     if action == "NO_TRADE":
         reasons = result.proposal.uncertainty.get("reasons")
+        if reasons is None and result.proposal.uncertainty.get("rationale"):
+            reasons = ["llm_decided_no_trade"]
         return (
             f"Bot suggests NO_TRADE (reasons={reasons}). "
             "Not a buy/sell candidate; Risk REJECT on RP-ACTION is expected."

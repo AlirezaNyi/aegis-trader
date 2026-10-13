@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -24,7 +25,9 @@ from aegis.paper.equity import (
 )
 from aegis.paper.exceptions import PaperBrokerError
 from aegis.pipeline.activity import ActivityStage, ActivityState
+from aegis.pipeline.audit import DecisionAuditStore
 from aegis.pipeline.context import build_paper_risk_context
+from aegis.pipeline.defaults import proposal_defaults_from_policy
 from aegis.pipeline.intent import IntentBuildError, intent_from_approved
 from aegis.risk.engine import evaluate_risk
 from aegis.risk.handoff import RiskHandoffDenied, may_submit_to_order_manager
@@ -56,6 +59,7 @@ class PaperCycleDeps:
     equity_tracker: PaperEquityTracker = field(default_factory=PaperEquityTracker)
     proposal_history: ProposalHistory = field(default_factory=ProposalHistory)
     activity: ActivityState | None = None
+    audit: DecisionAuditStore | None = None
 
 
 def _notify_activity(
@@ -317,7 +321,7 @@ async def run_paper_cycle(
         validation.candles,
         evidence_time=clock,
         concurrency=deps.analyst_concurrency,
-        timeout_seconds=2.0,
+        timeout_seconds=deps.settings.analyst_timeout_seconds,
     )
     _notify_activity(
         deps,
@@ -339,7 +343,8 @@ async def run_paper_cycle(
         timeframe=timeframe,
         correlation_id=corr,
     )
-    jev_result = deps.jev_port.evaluate(package)
+    # Jev and LLM adapters use blocking httpx; keep them off the event loop.
+    jev_result = await asyncio.to_thread(deps.jev_port.evaluate, package)
     _notify_activity(
         deps,
         ActivityStage.SUPERVISOR,
@@ -347,15 +352,20 @@ async def run_paper_cycle(
         timeframe=timeframe,
         correlation_id=corr,
     )
-    proposal = supervise(
+    proposal = await asyncio.to_thread(
+        supervise,
         package,
         jev_result,
         deps.llm_port,
         budgets=deps.supervisor_budgets,
+        timeout_seconds=deps.settings.supervisor_timeout_seconds,
         strategy_id=deps.strategy_id,
         strategy_version=deps.strategy_version,
         clock=lambda: clock,
+        defaults=proposal_defaults_from_policy(deps.risk_policy),
     )
+    if deps.audit is not None:
+        await asyncio.to_thread(deps.audit.record, package, jev_result, proposal)
     mark = validation.candles[-1].close
     _notify_activity(
         deps,

@@ -41,6 +41,14 @@ Soak uses public REST only (no trade keys).
   review history, BUY/SELL percent marks, paper cash equity. No live/order controls.
 * `NO_TRADE` + Risk `REJECT`/`RP-ACTION` is expected when the bot declines a trade.
 
+## Decision cycle runtime
+
+* Analyst and Supervisor timeouts come from `AEGIS_ANALYST_TIMEOUT_SECONDS` and
+  `AEGIS_SUPERVISOR_TIMEOUT_SECONDS`.
+* Jev and LLM adapters are blocking httpx; the cycle runs them via `asyncio.to_thread`.
+* `DecisionAuditStore` persists evidence package, analyst evidence, Jev result, and proposal
+  per cycle (fail open, like the journal). Risk decisions are not persisted there yet.
+
 ## Dashboard / signal marks
 
 * BUY/SELL hypothetical return is **percent only** (entry = final bar close). Dollar PnL is
@@ -55,6 +63,7 @@ Soak uses public REST only (no trade keys).
 
 * WS as primary finalize trigger (REST poll is the soak v1 trigger).
 * Exchange inventory reconcile remains out of scope (audit M1).
-* Intent mapping requires `entry_price` + `sizing.notional` on APPROVE.
+* Intent mapping requires `entry_price` + `sizing.notional` on APPROVE. On the compact
+  Supervisor path `sizing.notional` comes from approved `RP-MAX-NOTIONAL-PER-ORDER`.
 * SE-* paper evaluation thresholds remain UNAPPROVED (soak is learning, not promotion).
 * Candle table persistence for full counterfactual history across restarts.

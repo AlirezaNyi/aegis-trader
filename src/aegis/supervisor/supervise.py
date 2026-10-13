@@ -15,6 +15,12 @@ from aegis.interfaces.llm import LlmPort, UnavailableLlmPort
 from aegis.schemas.evidence import EvidencePackage, JevResult
 from aegis.schemas.proposal import ProposalAction, TradeDirection, TradeProposal
 from aegis.supervisor.budgets import BudgetConfig, budgets_allow_call
+from aegis.supervisor.decision import (
+    ProposalDefaults,
+    SupervisorDecision,
+    is_compact_decision,
+    proposal_from_decision,
+)
 from aegis.supervisor.gates import evaluate_pre_llm_gates
 from aegis.supervisor.prompt import build_supervisor_prompt
 
@@ -123,8 +129,14 @@ def supervise(
     strategy_id: str = "aegis-default",
     strategy_version: str = "0.0.0-phase4",
     clock: Clock | None = None,
+    defaults: ProposalDefaults | None = None,
 ) -> TradeProposal:
-    """Run deterministic gates then optional structured LLM completion."""
+    """Run deterministic gates then optional structured LLM completion.
+
+    The LLM may return either a compact ``SupervisorDecision`` (preferred; code
+    fills identity, sizing, order params, and expiry from ``defaults``) or a full
+    ``TradeProposal`` payload (legacy). Any validation failure is NO_TRADE.
+    """
     gate_reasons = evaluate_pre_llm_gates(package, jev_result)
     if gate_reasons:
         return no_trade_proposal(
@@ -162,7 +174,7 @@ def supervise(
     try:
         raw = llm.complete_structured(
             prompt=prompt,
-            schema_name="TradeProposal",
+            schema_name="SupervisorDecision",
             timeout_seconds=timeout_seconds,
         )
     except Exception as exc:  # noqa: BLE001 — fail closed on any provider failure
@@ -262,8 +274,25 @@ def supervise(
             )
 
     try:
-        proposal = TradeProposal.model_validate(payload)
-    except ValidationError:
+        if is_compact_decision(payload):
+            decision = SupervisorDecision.model_validate(payload)
+            proposal = proposal_from_decision(
+                decision,
+                package,
+                jev_result,
+                defaults=defaults or ProposalDefaults(),
+                strategy_id=strategy_id,
+                strategy_version=strategy_version,
+                now=(clock or _utcnow)(),
+            )
+        else:
+            proposal = TradeProposal.model_validate(payload)
+    except ValidationError as exc:
+        # Field locations and error types only; never echo model-supplied values.
+        schema_errors = [
+            {"loc": [str(part) for part in err.get("loc", ())], "type": err.get("type")}
+            for err in exc.errors()[:5]
+        ]
         return no_trade_proposal(
             package,
             jev_result,
@@ -272,6 +301,7 @@ def supervise(
             strategy_version=strategy_version,
             clock=clock,
             supervisor_model_meta={"latency_ms": latency_ms, **meta},
+            uncertainty_extra={"schema_errors": schema_errors},
         )
 
     proposal = _overwrite_identity(
