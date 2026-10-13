@@ -31,7 +31,9 @@ def build_paper_risk_context(
     equity_tracker: PaperEquityTracker | None = None,
     proposal_history: ProposalHistory | None = None,
     daily_loss_limit: Decimal | None = None,
-    spread: Decimal = Decimal("0"),
+    spread: Decimal | None = None,
+    best_bid: Decimal | None = None,
+    best_ask: Decimal | None = None,
     slippage_model_bps: Decimal = Decimal("5"),
     fee_estimate: Decimal = Decimal("5"),
 ) -> RiskContext:
@@ -88,7 +90,10 @@ def build_paper_risk_context(
         daily_loss=snap.daily_loss,
         drawdown=snap.drawdown,
         spread=spread,
-        liquidity_ok=True,
+        best_bid=best_bid,
+        best_ask=best_ask,
+        # Liquidity is only known when a real order-book spread was observed.
+        liquidity_ok=spread is not None,
         fee_estimate=fee_estimate,
         funding_ok=True,
         slippage_model_bps=slippage_model_bps,

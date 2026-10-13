@@ -11,13 +11,19 @@ from typing import Protocol
 from aegis.config.settings import Settings, TradingMode
 from aegis.interfaces.market_data import MarketDataPort
 from aegis.logging import get_logger
+from aegis.market_data.candle_store import CandleStore
 from aegis.market_data.timeutil import interval_to_milliseconds
 from aegis.ops.shutdown import ShutdownGate
 from aegis.pipeline.activity import ActivityStage, ActivityState
-from aegis.pipeline.cycle import PaperCycleDeps, PaperCycleResult, run_paper_cycle
+from aegis.pipeline.cycle import (
+    PaperCycleDeps,
+    PaperCycleResult,
+    run_paper_cycle,
+    stale_after_ms,
+)
 from aegis.pipeline.journal import PaperCycleJournal, build_review_record
 from aegis.schemas.common import MarketType, Timeframe
-from aegis.schemas.market import Candle, InstrumentRef
+from aegis.schemas.market import Candle, InstrumentRef, OrderBookTop
 
 logger = get_logger("aegis.pipeline.soak")
 
@@ -58,6 +64,7 @@ class PaperSoakRunner:
     candle_limit: int = 100
     journal: PaperCycleJournal | None = None
     activity: ActivityState | None = None
+    candle_store: CandleStore | None = None
     _last_final_open: dict[str, datetime] = field(default_factory=dict, init=False)
     cycles_run: int = field(default=0, init=False)
     last_outcome: SoakPollOutcome | None = field(default=None, init=False)
@@ -210,12 +217,27 @@ class PaperSoakRunner:
                 symbol=symbol,
             )
 
+        if self.candle_store is not None:
+            try:
+                self.candle_store.upsert_final(candles)
+            except Exception as exc:  # noqa: BLE001 — storage never blocks a cycle
+                logger.warning(
+                    "paper_soak_candle_store_failed symbol=%s err=%s",
+                    symbol,
+                    type(exc).__name__,
+                    extra={"event": "paper_soak_candle_store_failed", "component": "soak"},
+                )
+
+        book = self._fetch_book_top(
+            instrument, max_age_ms=stale_after_ms(self.deps.risk_policy)
+        )
         result = await run_paper_cycle(
             candles,
             deps=self.deps,
             instrument=instrument,
             timeframe=self.timeframe,
             now=clock,
+            book_top=book,
         )
         self._last_final_open[symbol] = newest.open_time
         self.cycles_run += 1
@@ -236,6 +258,42 @@ class PaperSoakRunner:
             final_open_time=newest.open_time,
             symbol=symbol,
         )
+
+    def _fetch_book_top(
+        self, instrument: InstrumentRef, *, max_age_ms: int
+    ) -> OrderBookTop | None:
+        """Public order-book top; None when unavailable or stale (Risk then rejects)."""
+        getter = getattr(self.market_data, "get_order_book_top", None)
+        if getter is None:
+            return None
+        try:
+            top: OrderBookTop = getter(instrument)
+        except Exception as exc:  # noqa: BLE001 — missing book fails closed downstream
+            logger.warning(
+                "paper_soak_depth_failed symbol=%s err=%s",
+                instrument.symbol,
+                type(exc).__name__,
+                extra={"event": "paper_soak_depth_failed", "component": "soak"},
+            )
+            return None
+        # INV-05: a stale or untimestamped book is treated like missing data.
+        if top.exchange_time is None:
+            logger.warning(
+                "paper_soak_depth_untimestamped symbol=%s",
+                instrument.symbol,
+                extra={"event": "paper_soak_depth_untimestamped", "component": "soak"},
+            )
+            return None
+        age_ms = (top.received_at - top.exchange_time).total_seconds() * 1000
+        if age_ms > max_age_ms:
+            logger.warning(
+                "paper_soak_depth_stale symbol=%s age_ms=%d",
+                instrument.symbol,
+                int(age_ms),
+                extra={"event": "paper_soak_depth_stale", "component": "soak"},
+            )
+            return None
+        return top
 
     def _record_cycle(
         self,

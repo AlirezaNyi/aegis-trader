@@ -72,7 +72,10 @@ class Settings(BaseSettings):
     llm_provider: str = Field(
         default="",
         validation_alias=AliasChoices("AEGIS_LLM_PROVIDER", "llm_provider"),
-        description="Owner-selected provider: gemini | openrouter | groq (empty → UnavailableLlmPort).",
+        description=(
+            "Owner-selected provider: gemini | openrouter | groq "
+            "(empty → UnavailableLlmPort)."
+        ),
     )
     llm_api_key: str = Field(
         default="",
@@ -154,6 +157,11 @@ class Settings(BaseSettings):
             "AEGIS_LLM_LATENCY_BUDGET_MS", "llm_latency_budget_ms"
         ),
     )
+    llm_daily_call_cap: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("AEGIS_LLM_DAILY_CALL_CAP", "llm_daily_call_cap"),
+        description="Owner-set max real Supervisor LLM calls per UTC day (empty = no cap).",
+    )
 
     # When False, readiness skips DB connectivity (unit tests).
     require_database: bool = Field(
@@ -173,6 +181,15 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("AEGIS_PAPER_SLIPPAGE_BPS", "paper_slippage_bps"),
         ge=0,
         description="Simulated slippage in basis points (paper/backtest only).",
+    )
+    paper_initial_balance: Decimal | None = Field(
+        default=None,
+        validation_alias=AliasChoices("AEGIS_PAPER_INITIAL_BALANCE", "paper_initial_balance"),
+        gt=0,
+        description=(
+            "Owner-set simulated starting quote balance (USDT) for the paper ledger. "
+            "Unset = 0, so approved paper orders fail for insufficient balance."
+        ),
     )
 
     # Paper soak runner — engineering only. Default off. Never arms live.
@@ -273,6 +290,8 @@ class Settings(BaseSettings):
         "llm_token_budget",
         "llm_cost_budget",
         "llm_latency_budget_ms",
+        "llm_daily_call_cap",
+        "paper_initial_balance",
         mode="before",
     )
     @classmethod
@@ -303,6 +322,9 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         if self.llm_latency_budget_ms is not None and self.llm_latency_budget_ms <= 0:
             msg = "AEGIS_LLM_LATENCY_BUDGET_MS must be > 0 when set"
+            raise ValueError(msg)
+        if self.llm_daily_call_cap is not None and self.llm_daily_call_cap <= 0:
+            msg = "AEGIS_LLM_DAILY_CALL_CAP must be > 0 when set"
             raise ValueError(msg)
         return self
 

@@ -46,7 +46,10 @@ def _proposal(*, action: ProposalAction = ProposalAction.BUY) -> TradeProposal:
             "usage": {},
             "latency_ms": 0,
         },
-        uncertainty={"reasons": ["unit_test"], "prefer_no_trade": action == ProposalAction.NO_TRADE},
+        uncertainty={
+            "reasons": ["unit_test"],
+            "prefer_no_trade": action == ProposalAction.NO_TRADE,
+        },
         invalidation={},
         supervisor_model_meta={},
         created_at=now,

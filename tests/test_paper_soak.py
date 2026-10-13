@@ -305,3 +305,53 @@ def test_create_app_soak_on_still_null_execution() -> None:
         assert client.get("/health").status_code == 200
         assert app.state.paper_soak_runner is not None
     assert isinstance(app.state.execution_port, NullExecutionPort)
+
+
+class _BookMarketData:
+    def __init__(self, top: object) -> None:
+        self.top = top
+
+    def get_order_book_top(self, instrument: InstrumentRef) -> object:
+        _ = instrument
+        if isinstance(self.top, Exception):
+            raise self.top
+        return self.top
+
+
+def _top(*, exchange_age_ms: int | None) -> object:
+    from aegis.schemas.market import OrderBookTop
+
+    received = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
+    return OrderBookTop(
+        instrument=_instrument(),
+        best_bid=Decimal("99.9"),
+        best_bid_qty=Decimal("1"),
+        best_ask=Decimal("100.1"),
+        best_ask_qty=Decimal("1"),
+        exchange_time=(
+            None
+            if exchange_age_ms is None
+            else received - timedelta(milliseconds=exchange_age_ms)
+        ),
+        received_at=received,
+    )
+
+
+@pytest.mark.parametrize(
+    ("top", "expect_book"),
+    [
+        (_top(exchange_age_ms=100), True),
+        (_top(exchange_age_ms=60_000), False),  # stale beyond RP-DATA-FRESHNESS-MS
+        (_top(exchange_age_ms=None), False),  # untimestamped => treated as stale
+        (RuntimeError("depth down"), False),
+    ],
+)
+def test_soak_book_top_freshness_fails_closed(top: object, expect_book: bool) -> None:
+    runner = PaperSoakRunner(
+        market_data=_BookMarketData(top),  # type: ignore[arg-type]
+        deps=_deps(),
+        instruments=(_instrument(),),
+        timeframe=Timeframe.M1,
+    )
+    book = runner._fetch_book_top(_instrument(), max_age_ms=5000)
+    assert (book is not None) is expect_book

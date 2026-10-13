@@ -22,6 +22,7 @@ from aegis.config.settings import Settings, TradingMode, get_settings
 from aegis.interfaces.execution import NullExecutionPort
 from aegis.jev.factory import build_jev_port
 from aegis.logging import configure_logging, get_logger
+from aegis.market_data.candle_store import CandleStore
 from aegis.market_data.gateway import MarketDataGateway
 from aegis.market_data.rest_client import ToobitRestMarketDataClient
 from aegis.ops.alerts import AlertEvaluator
@@ -42,7 +43,11 @@ from aegis.pipeline.soak import (
 )
 from aegis.reconcile.service import Reconciler
 from aegis.risk.factory import build_risk_policy_from_settings
-from aegis.supervisor.factory import budget_config_from_settings, build_llm_port
+from aegis.supervisor.factory import (
+    budget_config_from_settings,
+    build_call_limiter,
+    build_llm_port,
+)
 
 
 def _should_start_paper_soak(settings: Settings) -> bool:
@@ -92,6 +97,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     timeframe=soak_timeframe_from_settings(resolved),
                     journal=_app.state.paper_journal,
                     activity=_app.state.activity,
+                    candle_store=_app.state.candle_store,
                 )
                 _app.state.paper_soak_runner = runner
                 soak_task = asyncio.create_task(
@@ -155,7 +161,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Paper ledger — simulation only.
     paper_ledger = PaperLedger()
     app.state.paper_ledger = paper_ledger
-    paper_broker = PaperBroker(settings=safe_settings, ledger=paper_ledger)
+    paper_broker = PaperBroker(
+        settings=safe_settings,
+        ledger=paper_ledger,
+        initial_quote_balance=resolved.paper_initial_balance,
+    )
     app.state.paper_broker = paper_broker
     # Order Manager uses NullExecutionPort until owner arms live + wires build_execution_port.
     null_execution = NullExecutionPort()
@@ -173,6 +183,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.activity = activity
     app.state.paper_journal = PaperCycleJournal(database_url=resolved.database_url)
     decision_audit = DecisionAuditStore(database_url=resolved.database_url)
+    app.state.candle_store = CandleStore(database_url=resolved.database_url)
     app.state.decision_audit = decision_audit
     # Paper decision cycle deps — callable on finalized candles only.
     paper_cycle_deps = PaperCycleDeps(
@@ -185,6 +196,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         analyst_concurrency=resolved.analyst_concurrency,
         activity=activity,
         audit=decision_audit,
+        llm_call_limiter=build_call_limiter(resolved),
     )
     app.state.paper_cycle_deps = paper_cycle_deps
     app.state.run_paper_cycle = run_paper_cycle

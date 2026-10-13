@@ -8,6 +8,7 @@ rejects the proposal (fail closed).
 from __future__ import annotations
 
 from datetime import timedelta
+from decimal import Decimal
 from typing import Any
 
 from aegis.risk.policy import ParamStatus, RiskPolicy
@@ -53,4 +54,19 @@ def proposal_defaults_from_policy(policy: RiskPolicy) -> ProposalDefaults:
     if ttl_ms is not None:
         ttl = timedelta(milliseconds=int(ttl_ms))
 
-    return ProposalDefaults(entry_conditions=entry_conditions, sizing=sizing, ttl=ttl)
+    max_stop_pct: Decimal | None = None
+    stop_param = policy.get("RP-STOP-LOSS-MAX-DISTANCE")
+    if (
+        stop_param is not None
+        and stop_param.status == ParamStatus.APPROVED
+        and stop_param.value is not None
+        and stop_param.unit in {"%", "percent", "pct"}
+    ):
+        max_stop_pct = Decimal(str(stop_param.value))
+
+    return ProposalDefaults(
+        entry_conditions=entry_conditions,
+        sizing=sizing,
+        ttl=ttl,
+        max_stop_distance_pct=max_stop_pct,
+    )

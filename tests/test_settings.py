@@ -53,3 +53,16 @@ def test_live_armed_ok() -> None:
         require_database=False,
     )
     assert settings.trading_mode == TradingMode.LIVE
+
+
+def test_paper_initial_balance_optional_and_positive() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from aegis.config.settings import Settings, TradingMode
+
+    base = {"trading_mode": TradingMode.PAPER, "require_database": False}
+    assert Settings(**base, paper_initial_balance="").paper_initial_balance is None
+    assert str(Settings(**base, paper_initial_balance="25").paper_initial_balance) == "25"
+    with pytest.raises(ValidationError):
+        Settings(**base, paper_initial_balance="0")

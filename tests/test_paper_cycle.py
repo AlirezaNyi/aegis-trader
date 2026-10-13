@@ -20,7 +20,7 @@ from aegis.pipeline.cycle import PaperCycleDeps, run_paper_cycle
 from aegis.risk.owner_v1 import owner_approved_policy_v1
 from aegis.schemas.common import EvidenceStatus, LedgerKind, MarketType, Timeframe
 from aegis.schemas.evidence import JevResult
-from aegis.schemas.market import Candle, InstrumentRef
+from aegis.schemas.market import Candle, InstrumentRef, OrderBookTop
 from aegis.schemas.proposal import ProposalAction, TradeDirection, TradeProposal
 from aegis.schemas.risk import RiskDecisionType
 from aegis.supervisor.budgets import BudgetConfig
@@ -136,6 +136,20 @@ def _buy_llm_payload(*, entry_price: str, now: datetime) -> dict[str, Any]:
     return proposal
 
 
+def _book(candle: Candle, *, spread_bps: Decimal = Decimal("5")) -> OrderBookTop:
+    """Observed book straddling the last close by ``spread_bps``."""
+    half = candle.close * spread_bps / Decimal("20000")
+    return OrderBookTop(
+        instrument=candle.instrument,
+        best_bid=candle.close - half,
+        best_bid_qty=Decimal("100"),
+        best_ask=candle.close + half,
+        best_ask_qty=Decimal("100"),
+        exchange_time=candle.received_at,
+        received_at=candle.received_at,
+    )
+
+
 def _deps(
     *,
     settings: Settings | None = None,
@@ -223,6 +237,7 @@ async def test_cycle_approve_path_paper_fill() -> None:
         instrument=_instrument(),
         timeframe=Timeframe.M1,
         now=now,
+        book_top=_book(candles[-1]),
     )
     assert result.validation.ok is True
     assert llm.calls == 1
@@ -338,6 +353,7 @@ async def test_cycle_compact_decision_approves_with_policy_sizing() -> None:
         instrument=_instrument(),
         timeframe=Timeframe.M1,
         now=now,
+        book_top=_book(candles[-1]),
     )
     assert result.proposal is not None
     assert result.proposal.action == ProposalAction.BUY
@@ -380,3 +396,93 @@ async def test_cycle_compact_decision_without_stop_is_rejected() -> None:
     assert result.decision.decision == RiskDecisionType.REJECT
     assert result.order is None
     assert deps.paper_broker.ledger.fills == []
+
+
+@pytest.mark.asyncio
+async def test_cycle_without_observed_spread_is_rejected() -> None:
+    """No order-book spread => RP-MAX-SPREAD / RP-MIN-LIQUIDITY reject (fail closed)."""
+    start = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
+    candles = _uptrend_series(45, start)
+    now = candles[-1].received_at + timedelta(milliseconds=100)
+    llm = CountingLlm(_compact_buy_payload(entry_price=str(candles[-1].close)))
+    budgets = BudgetConfig(
+        token_budget=2000,
+        cost_budget=Decimal("1.00"),
+        latency_budget_ms=5000,
+    )
+    deps = _deps(llm=llm, budgets=budgets)
+    result = await run_paper_cycle(
+        candles,
+        deps=deps,
+        instrument=_instrument(),
+        timeframe=Timeframe.M1,
+        now=now,
+    )
+    assert result.decision is not None
+    assert result.decision.decision == RiskDecisionType.REJECT
+    rule_ids = {r["rule_id"] for r in result.decision.rejection_reasons}
+    assert {"RP-MAX-SPREAD", "RP-MIN-LIQUIDITY"} <= rule_ids
+    assert result.order is None
+
+
+@pytest.mark.asyncio
+async def test_cycle_evidence_carries_market_context_and_spread() -> None:
+    start = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
+    candles = _uptrend_series(45, start)
+    now = candles[-1].received_at + timedelta(milliseconds=100)
+    seen: dict[str, str] = {}
+
+    class PromptSpy(CountingLlm):
+        def complete_structured(self, *, prompt: str, schema_name: str, timeout_seconds: float):  # type: ignore[override]
+            seen["prompt"] = prompt
+            return super().complete_structured(
+                prompt=prompt, schema_name=schema_name, timeout_seconds=timeout_seconds
+            )
+
+    llm = PromptSpy(_compact_buy_payload(entry_price=str(candles[-1].close)))
+    budgets = BudgetConfig(
+        token_budget=2000,
+        cost_budget=Decimal("1.00"),
+        latency_budget_ms=5000,
+    )
+    await run_paper_cycle(
+        candles,
+        deps=_deps(llm=llm, budgets=budgets),
+        instrument=_instrument(),
+        timeframe=Timeframe.M1,
+        now=now,
+        book_top=_book(candles[-1], spread_bps=Decimal("7.5")),
+    )
+    prompt = seen["prompt"]
+    assert '"market_context"' in prompt and '"last_close"' in prompt
+    assert '"spread_bps": "7.5' in prompt
+    assert "within 5% of entry_price" in prompt
+
+
+@pytest.mark.asyncio
+async def test_cycle_buy_entry_above_observed_ask_is_rejected() -> None:
+    """M3: LLM entry far above the real ask must not be approved."""
+    start = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
+    candles = _uptrend_series(45, start)
+    now = candles[-1].received_at + timedelta(milliseconds=100)
+    inflated = str(candles[-1].close * Decimal("1.03"))
+    llm = CountingLlm(_compact_buy_payload(entry_price=inflated))
+    budgets = BudgetConfig(
+        token_budget=2000,
+        cost_budget=Decimal("1.00"),
+        latency_budget_ms=5000,
+    )
+    deps = _deps(llm=llm, budgets=budgets)
+    result = await run_paper_cycle(
+        candles,
+        deps=deps,
+        instrument=_instrument(),
+        timeframe=Timeframe.M1,
+        now=now,
+        book_top=_book(candles[-1]),
+    )
+    assert result.decision is not None
+    assert result.decision.decision == RiskDecisionType.REJECT
+    rule_ids = {r["rule_id"] for r in result.decision.rejection_reasons}
+    assert "RP-ENTRY-VS-BOOK" in rule_ids
+    assert result.order is None

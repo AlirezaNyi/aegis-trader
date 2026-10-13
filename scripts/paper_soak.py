@@ -20,8 +20,10 @@ _SRC = _ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from aegis.config.runtime_public import settings_without_secrets  # noqa: E402
 from aegis.config.settings import Settings, TradingMode, clear_settings_cache  # noqa: E402
 from aegis.jev.factory import build_jev_port  # noqa: E402
+from aegis.market_data.candle_store import CandleStore  # noqa: E402
 from aegis.market_data.gateway import MarketDataGateway  # noqa: E402
 from aegis.market_data.rest_client import ToobitRestMarketDataClient  # noqa: E402
 from aegis.ops.shutdown import ShutdownGate  # noqa: E402
@@ -35,7 +37,11 @@ from aegis.pipeline.soak import (  # noqa: E402
     soak_timeframe_from_settings,
 )
 from aegis.risk.factory import build_risk_policy_from_settings  # noqa: E402
-from aegis.supervisor.factory import budget_config_from_settings, build_llm_port  # noqa: E402
+from aegis.supervisor.factory import (  # noqa: E402
+    budget_config_from_settings,
+    build_call_limiter,
+    build_llm_port,
+)
 
 
 def _jev_line(outcome: object) -> str:
@@ -67,13 +73,18 @@ async def _main(once: bool) -> int:
         paper_soak_enabled=True,
     )
     deps = PaperCycleDeps(
-        settings=settings,
+        # Ports above are built from full Settings; deps keep a secret-free copy.
+        settings=settings_without_secrets(settings),
         risk_policy=build_risk_policy_from_settings(settings),
         jev_port=build_jev_port(settings),
         llm_port=build_llm_port(settings),
         supervisor_budgets=budget_config_from_settings(settings),
-        paper_broker=PaperBroker(settings),
+        paper_broker=PaperBroker(
+            settings_without_secrets(settings),
+            initial_quote_balance=settings.paper_initial_balance,
+        ),
         analyst_concurrency=settings.analyst_concurrency,
+        llm_call_limiter=build_call_limiter(settings),
     )
     rest = ToobitRestMarketDataClient()
     try:
@@ -82,6 +93,7 @@ async def _main(once: bool) -> int:
             deps=deps,
             instruments=soak_instruments_from_settings(settings),
             timeframe=soak_timeframe_from_settings(settings),
+            candle_store=CandleStore(database_url=settings.database_url),
         )
         if once:
             await runner.poll_once()

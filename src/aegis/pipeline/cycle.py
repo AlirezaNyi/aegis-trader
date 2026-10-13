@@ -16,6 +16,7 @@ from aegis.evidence.builder import build_evidence_package, empty_package_shell
 from aegis.features.engine import compute_features
 from aegis.interfaces.jev import JevPort
 from aegis.interfaces.llm import LlmPort
+from aegis.market_data.depth import spread_bps as compute_spread_bps
 from aegis.paper.broker import PaperBroker
 from aegis.paper.equity import (
     PaperEquityTracker,
@@ -34,11 +35,11 @@ from aegis.risk.handoff import RiskHandoffDenied, may_submit_to_order_manager
 from aegis.risk.policy import ParamStatus, RiskPolicy
 from aegis.schemas.common import EvidenceStatus, Timeframe
 from aegis.schemas.evidence import JevResult
-from aegis.schemas.market import Candle, InstrumentRef
+from aegis.schemas.market import Candle, InstrumentRef, OrderBookTop
 from aegis.schemas.orders import Order
 from aegis.schemas.proposal import TradeProposal
 from aegis.schemas.risk import RiskDecision, RiskDecisionType
-from aegis.supervisor.budgets import BudgetConfig
+from aegis.supervisor.budgets import BudgetConfig, DailyCallLimiter
 from aegis.supervisor.supervise import no_trade_proposal, supervise
 from aegis.validation.stage import ValidationResult, validate_candles
 
@@ -60,6 +61,8 @@ class PaperCycleDeps:
     proposal_history: ProposalHistory = field(default_factory=ProposalHistory)
     activity: ActivityState | None = None
     audit: DecisionAuditStore | None = None
+    # Shared across cycles so the owner's daily LLM call cap is global.
+    llm_call_limiter: DailyCallLimiter | None = None
 
 
 def _notify_activity(
@@ -94,7 +97,7 @@ class PaperCycleResult:
     blocked_reason: str | None = None
 
 
-def _stale_after_ms(policy: RiskPolicy) -> int:
+def stale_after_ms(policy: RiskPolicy) -> int:
     param = policy.get("RP-DATA-FRESHNESS-MS")
     if param is not None and param.status == ParamStatus.APPROVED and param.value is not None:
         return int(param.value)
@@ -188,12 +191,16 @@ async def run_paper_cycle(
     timeframe: Timeframe,
     now: datetime | None = None,
     correlation_id: str | None = None,
+    spread_bps: Decimal | None = None,
+    book_top: OrderBookTop | None = None,
 ) -> PaperCycleResult:
     """Run one decision cycle on finalized candles. Paper/development only.
 
     Never constructs a live Toobit submit client. Never calls OrderManager.
     Unavailable Jev/LLM fail closed to NO_TRADE / REJECT with zero fills.
     """
+    if book_top is not None and spread_bps is None:
+        spread_bps = compute_spread_bps(book_top)
     clock = now if now is not None else datetime.now(tz=UTC)
     if clock.tzinfo is None:
         clock = clock.replace(tzinfo=UTC)
@@ -271,7 +278,7 @@ async def run_paper_cycle(
         instrument=instrument,
         timeframe=timeframe,
         now=clock,
-        stale_after_ms=_stale_after_ms(deps.risk_policy),
+        stale_after_ms=stale_after_ms(deps.risk_policy),
     )
 
     if not validation.ok:
@@ -322,6 +329,7 @@ async def run_paper_cycle(
         evidence_time=clock,
         concurrency=deps.analyst_concurrency,
         timeout_seconds=deps.settings.analyst_timeout_seconds,
+        spread=spread_bps,
     )
     _notify_activity(
         deps,
@@ -335,6 +343,8 @@ async def run_paper_cycle(
         analyst_evidence,
         correlation_id=corr,
         created_at=clock,
+        candles=validation.candles,
+        spread_bps=spread_bps,
     )
     _notify_activity(
         deps,
@@ -363,6 +373,7 @@ async def run_paper_cycle(
         strategy_version=deps.strategy_version,
         clock=lambda: clock,
         defaults=proposal_defaults_from_policy(deps.risk_policy),
+        call_limiter=deps.llm_call_limiter,
     )
     if deps.audit is not None:
         await asyncio.to_thread(deps.audit.record, package, jev_result, proposal)
@@ -385,6 +396,11 @@ async def run_paper_cycle(
         equity_tracker=deps.equity_tracker,
         proposal_history=deps.proposal_history,
         daily_loss_limit=_daily_loss_limit(deps.risk_policy),
+        # Real order-book spread in bps; None (unobserved) fails RP-MAX-SPREAD closed.
+        spread=spread_bps,
+        # Observed top of book; None => RP-ENTRY-VS-BOOK rejects (fail closed).
+        best_bid=None if book_top is None else book_top.best_bid,
+        best_ask=None if book_top is None else book_top.best_ask,
         slippage_model_bps=Decimal(str(deps.settings.paper_slippage_bps)),
         fee_estimate=Decimal(str(deps.settings.paper_fee_bps)),
     )
