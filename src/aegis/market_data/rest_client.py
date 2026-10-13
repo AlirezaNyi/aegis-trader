@@ -9,18 +9,22 @@ import httpx
 
 from aegis.interfaces.clock import Clock, SystemClock
 from aegis.market_data.constants import (
+    DEPTH_DEFAULT_LIMIT,
+    DEPTH_MAX_LIMIT,
     KLINES_MAX_LIMIT,
+    PATH_DEPTH,
     PATH_EXCHANGE_INFO,
     PATH_KLINES,
     PATH_TIME,
     REST_BASE_URL,
     SUPPORTED_KLINE_INTERVALS,
 )
+from aegis.market_data.depth import parse_depth_top
 from aegis.market_data.klines import MalformedKlineError, parse_rest_kline_row
 from aegis.market_data.metadata import parse_exchange_info
 from aegis.market_data.timeutil import datetime_to_ms
 from aegis.schemas.common import Timeframe
-from aegis.schemas.market import Candle, InstrumentRef
+from aegis.schemas.market import Candle, InstrumentRef, OrderBookTop
 from aegis.schemas.metadata import SymbolMetadata
 
 
@@ -113,3 +117,28 @@ class ToobitRestMarketDataClient:
             except MalformedKlineError:
                 raise
         return candles
+
+    def get_depth(
+        self,
+        instrument: InstrumentRef,
+        *,
+        limit: int = DEPTH_DEFAULT_LIMIT,
+    ) -> OrderBookTop:
+        """Public `GET /quote/v1/depth`; returns best bid/ask only.
+
+        Raises `MalformedDepthError` / `EmptyOrderBookError` when the payload does
+        not match the verified `t`/`b`/`a` shape.
+        """
+        if limit < 1 or limit > DEPTH_MAX_LIMIT:
+            raise ValueError(f"limit must be 1..{DEPTH_MAX_LIMIT}")
+        response = self._client.get(
+            PATH_DEPTH,
+            params={"symbol": instrument.symbol, "limit": limit},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return parse_depth_top(
+            payload,
+            instrument=instrument,
+            received_at=self._clock.now(),
+        )

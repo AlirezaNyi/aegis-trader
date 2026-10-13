@@ -3,10 +3,20 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -320,6 +330,44 @@ class BacktestRunRow(Base):
     oos_metrics: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     uncertainty_notes: Mapped[str] = mapped_column(Text, nullable=False, default="")
     disclaimer: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class MarketCandleRow(Base):
+    """Finalized public Toobit candles (append-only; idempotent on natural key)."""
+
+    __tablename__ = "market_candles"
+    __table_args__ = (
+        UniqueConstraint(
+            "exchange",
+            "market_type",
+            "symbol",
+            "interval",
+            "open_time",
+            name="uq_market_candles_key",
+        ),
+    )
+
+    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    exchange: Mapped[str] = mapped_column(String(32), nullable=False)
+    market_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    interval: Mapped[str] = mapped_column(String(8), nullable=False)
+    open_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    close_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    open: Mapped[Decimal] = mapped_column(Numeric(asdecimal=True), nullable=False)
+    high: Mapped[Decimal] = mapped_column(Numeric(asdecimal=True), nullable=False)
+    low: Mapped[Decimal] = mapped_column(Numeric(asdecimal=True), nullable=False)
+    close: Mapped[Decimal] = mapped_column(Numeric(asdecimal=True), nullable=False)
+    volume: Mapped[Decimal] = mapped_column(Numeric(asdecimal=True), nullable=False)
+    quote_volume: Mapped[Decimal | None] = mapped_column(Numeric(asdecimal=True), nullable=True)
+    trade_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

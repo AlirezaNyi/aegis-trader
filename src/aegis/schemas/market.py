@@ -45,3 +45,15 @@ class Candle(ApiModel):
     is_final: bool
     source: str
     received_at: datetime
+
+
+class OrderBookTop(ApiModel):
+    """Best bid/ask from public `GET /quote/v1/depth` (verified shape `t`/`b`/`a`)."""
+
+    instrument: InstrumentRef
+    best_bid: Decimal
+    best_bid_qty: Decimal
+    best_ask: Decimal
+    best_ask_qty: Decimal
+    exchange_time: datetime | None = None
+    received_at: datetime

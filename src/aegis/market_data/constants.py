@@ -23,6 +23,11 @@ SUPPORTED_KLINE_INTERVALS = frozenset({"1m", "5m", "15m"})
 # Historical range requires startTime and/or endTime; limit max 1000.
 KLINES_MAX_LIMIT = 1000
 
+# Depth: docs give default 100 and say limit=0 returns "a lot"; no max documented.
+# Aegis only needs top of book, so cap requests (engineering cap, not exchange limit).
+DEPTH_DEFAULT_LIMIT = 5
+DEPTH_MAX_LIMIT = 100
+
 # Client must send ping; server disconnects within ~5 minutes without heartbeat.
 WS_PING_INTERVAL_SECONDS = 30.0
 WS_MAX_INCOMING_MESSAGES_PER_SECOND = 5  # documented WS control-message limit

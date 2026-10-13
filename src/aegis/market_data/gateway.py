@@ -12,7 +12,12 @@ from aegis.market_data.metrics import MarketDataMetrics
 from aegis.market_data.quality import CandleStreamTracker
 from aegis.market_data.rest_client import ToobitRestMarketDataClient
 from aegis.schemas.common import Timeframe
-from aegis.schemas.market import Candle, InstrumentRef, NormalizedMarketEvent
+from aegis.schemas.market import (
+    Candle,
+    InstrumentRef,
+    NormalizedMarketEvent,
+    OrderBookTop,
+)
 from aegis.schemas.metadata import SymbolMetadata
 
 # Engineering cap for optional WS-side event buffer — not a risk-policy value.
@@ -81,6 +86,17 @@ class MarketDataGateway(MarketDataPort):
         if candles:
             self.tracker.observe(candles[-1])
         return candles
+
+    def get_order_book_top(
+        self,
+        instrument: InstrumentRef,
+        *,
+        limit: int | None = None,
+    ) -> OrderBookTop:
+        """Best bid/ask via public depth REST (not part of MarketDataPort yet)."""
+        if limit is None:
+            return self._rest.get_depth(instrument)
+        return self._rest.get_depth(instrument, limit=limit)
 
     def stream_events(self) -> Sequence[NormalizedMarketEvent]:
         return list(self._events)
