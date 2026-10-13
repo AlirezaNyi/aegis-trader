@@ -32,6 +32,16 @@ All numeric values use `Decimal`.
 
 `schema_version`, `snapshot_id`, `instrument`, `market_type`, `timeframe`, `as_of`, `include_intrabar`, `candle_count`, `gap_detected`, `features` (map of name → `{value, status, reason}`), `created_at`.
 
+## Evidence `market_context` (optional)
+
+`EvidencePackage.market_context` (built by `aegis.evidence.build_market_context`, or `build_evidence_package(..., candles=...)`) gives descriptive price levels:
+
+* Uses only `is_final` candles matching the snapshot instrument/timeframe with `close_time <= snapshot.as_of` (no look-ahead, no intrabar). `None` when no such candle exists.
+* `last_close`, `recent_high` (max high), `recent_low` (min low) over the last `lookback_candles` (default lookback 20; fewer if history is short).
+* `atr_14` copied from the snapshot only when its status is `ok` (absolute price units); `atr_pct_of_close = atr_14 / last_close * 100`, quantized to 4 dp (percent, `0.42` = 0.42%).
+* `spread_bps` is caller-supplied; `spread_status` is `ok` when provided, else `unavailable`. The builder never derives spread from candles.
+* `as_of` is the `close_time` of the last eligible candle.
+
 ## Non-goals
 
 * Features are descriptive inputs for analysts. They are not trade signals and do not size or approve orders.

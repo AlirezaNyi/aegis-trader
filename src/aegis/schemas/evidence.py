@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import Field
@@ -42,6 +43,24 @@ class JevResult(ApiModel):
     )
 
 
+class MarketContext(ApiModel):
+    """Descriptive price levels from finalized candles (no look-ahead).
+
+    ``atr_14`` is in absolute price units; ``atr_pct_of_close`` is a percent
+    (``0.42`` means 0.42%). Descriptive only; not a trade signal or sizing input.
+    """
+
+    last_close: Decimal
+    recent_high: Decimal
+    recent_low: Decimal
+    lookback_candles: int
+    atr_14: Decimal | None = None
+    atr_pct_of_close: Decimal | None = None
+    spread_bps: Decimal | None = None
+    spread_status: Literal["ok", "unavailable"] = "unavailable"
+    as_of: datetime
+
+
 class EvidencePackage(ApiModel):
     schema_version: str = "1"
     package_id: UUID
@@ -53,3 +72,4 @@ class EvidencePackage(ApiModel):
     as_of: datetime
     feature_refs: list[str] = Field(default_factory=list)
     analyst_evidence: list[AnalystEvidence] = Field(default_factory=list)
+    market_context: MarketContext | None = None
