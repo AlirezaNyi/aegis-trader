@@ -90,6 +90,7 @@ See [RISK_POLICY.md](RISK_POLICY.md) §4.
 | `GET /api/v1/time` | Server time | Verified |
 | `GET /api/v1/exchangeInfo` | Symbols + contracts; `rateLimits` field deprecated/removal warned | Verified |
 | `GET /quote/v1/klines` | Intervals include 1m, 5m, 15m; limit default/max 1000; without start/end returns latest only | Verified |
+| Kline row index 6 (close time) | Observed `0` on spot 5m klines 2026-10-13; parser derives close = open + interval - 1 when index 6 <= open | Observed live |
 | `GET /quote/v1/depth` | Order book | Verified |
 | `GET /quote/v1/trades` | Recent trades | Verified |
 | `GET /quote/v1/markPrice` | Mark price | Verified |
@@ -163,6 +164,8 @@ Plan order statuses include `ORDER_NEW`, `ORDER_FILLED`, `ORDER_REJECTED`, `ORDE
 | Official Python SDK `typesafe_sdk` with `system_one` | Verified |
 | SDK default retries on 429/529 — Aegis must bound retries vs evidence freshness | Verified behavior + Aegis constraint |
 | Official integration via AI gateway / OpenRouter mirrors | Documented as alternate SDK base_url examples; **Proposed reject** for Aegis (use official TypeSafe host only) |
+| Question format: `choice` = `instructions` + `criteria` map (option → description); `score` = `instructions` + `criteria` ordered array, 0-indexed; `noul` = `instructions` + optional `criteria` `{true,false}`, answer is P(yes). `options` / `levels` fields are **not** accepted (422) | Verified by live call 2026-10-13 + docs.typesafe.ai/primitives |
+| Response: top-level `model`, `answers` (keyed by request ids), `usage` (`input_tokens`, `output_tokens`); choice answer has `type, choice, confidence, probabilities`; score has `type, score, confidence, legend, probabilities`; noul has `type, noul` | Verified by live call 2026-10-13 (`scripts/jev_probe.py`) |
 | Jev places exchange orders | Not a capability — returns structured answers only | Verified non-capability |
 
 ### 4.1 Aegis Jev adapter contract (Internal)
