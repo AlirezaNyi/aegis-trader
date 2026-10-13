@@ -91,7 +91,8 @@ See [RISK_POLICY.md](RISK_POLICY.md) §4.
 | `GET /api/v1/exchangeInfo` | Symbols + contracts; `rateLimits` field deprecated/removal warned | Verified |
 | `GET /quote/v1/klines` | Intervals include 1m, 5m, 15m; limit default/max 1000; without start/end returns latest only | Verified |
 | Kline row index 6 (close time) | Observed `0` on spot 5m klines 2026-10-13; parser derives close = open + interval - 1 when index 6 <= open | Observed live |
-| `GET /quote/v1/depth` | Order book | Verified |
+| `GET /quote/v1/depth` | Order book. Params `symbol` (required), `limit` (default 100; `0` = large). Response `{"t": ms matching time, "b": [[price, qty], ...], "a": [[price, qty], ...]}`, decimal strings, price first. Sort order undocumented (live: bids desc, asks asc) — Aegis uses max bid / min ask. Same path served futures `BTC-SWAP-USDT` live 2026-10-13 | Verified (docs + live public request 2026-10-13) |
+| Kline `startTime`/`endTime` history depth | Live 2026-10-13: startTime inclusive, endTime respected, rows oldest->newest; only ~3,500 most recent bars per interval returned (older windows empty). Not stated in docs | Observed live |
 | `GET /quote/v1/trades` | Recent trades | Verified |
 | `GET /quote/v1/markPrice` | Mark price | Verified |
 | `GET /quote/v1/markPrice/klines` | Mark klines | Verified |
@@ -112,6 +113,22 @@ Symbol examples: Spot `ETHUSDT`; Futures contract `BTC-SWAP-USDT`.
 | `POST /api/v1/spot/orderTest` | Validate only |
 | `POST /api/v1/spot/batchOrders` | Batch up to 20 same symbol |
 | Query/cancel/open/history endpoints | Documented on Spot Account/Trade page (implement from that page in Phase 7) |
+
+Spot single-order facts re-read 2026-10-13 from <https://api-docs.toobit.com/api/spot-account-and-trading> and <https://api-docs.toobit.com/api/spot-error-codes>:
+
+| Fact | Status |
+| --- | --- |
+| `POST /api/v1/spot/order` params: `symbol`, `side`, `type`, `timeInForce` (opt), `quantity`, `price` (opt; required for `LIMIT`/`LIMIT_MAKER`), `newClientOrderId` (opt, "unique id among open orders"), `recvWindow`, `timestamp`. `MARKET` + `BUY`: `quantity` is quote-asset amount | Verified 2026-10-13 |
+| Success ack is a flat object (`orderId`, `clientOrderId`, `status`, `origQty`, `executedQty`, `price`, ...) with **no** `code` key | Verified 2026-10-13 (docs example) |
+| `POST /api/v1/spot/orderTest`: same params; validates without matching engine; success response `{}` | Verified 2026-10-13 |
+| Cancel `DELETE /api/v1/spot/order`: `orderId` **or** `clientOrderId` (not `origClientOrderId`) | Verified 2026-10-13 |
+| Query `GET /api/v1/spot/order`: `orderId` **or** `origClientOrderId` (not `clientOrderId`) | Verified 2026-10-13 |
+| Error body shape `{"code": <negative int>, "msg": "..."}` | Verified 2026-10-13 (error codes page) |
+| HTTP status accompanying a single-order error body (200 vs 4xx) | **Unverified** — Aegis treats an error `code` as error under either |
+| Execution-unknown codes: `-1000 UNKNOWN`, `-1001 DISCONNECTED`, `-1006 UNEXPECTED_RESP` ("Execution status unknown"), `-1007 TIMEOUT` ("execution status unknown"), `-1146 ORDER_CREATION_TIMEOUT`; `-1141 ORDER_DUPLICATED` ("Duplicate clientOrderId") | Verified codes; Aegis classifies these as **ambiguous** on submit (reconcile, never retry) |
+| `-2013 NO_SUCH_ORDER` "Order does not exist." | Verified |
+| Filter failures `PRICE_FILTER` / `LOT_SIZE` / `MIN_NOTIONAL` (text messages, no numeric code) | Verified existence; filter values come from `exchangeInfo` |
+| HTTP 4XX = malformed request (sender side); 5XX = execution status UNKNOWN | Verified (basic information page) |
 
 Spot API v2 order shape: **Unverified** for Aegis design until read and accepted.
 
