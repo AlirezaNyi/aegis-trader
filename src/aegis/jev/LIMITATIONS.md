@@ -20,7 +20,7 @@
 
 ## Unverified / deferred
 
-* Exact response nesting (`answers` vs top-level question keys) is handled defensively; pin against live docs when calibrating.
+* Response nesting pinned by live call on 2026-10-13: answers live under top-level `answers` (see docs/API_CONTRACTS.md §4). Re-run `scripts/jev_probe.py` after model changes.
 * Context size budgets (64k / 32k) are not enforced client-side yet — oversized packages may yield provider 422/`error`.
-* Model alias `jev-latest` can move; pin a versioned id when thresholds depend on calibration.
+* Model alias `jev-latest` resolved to `jev-1.13.0` on 2026-10-13 and can move; set `AEGIS_JEV_MODEL=jev-1.13.0` to pin it.
 * Jev never places exchange orders and never receives Toobit credentials.

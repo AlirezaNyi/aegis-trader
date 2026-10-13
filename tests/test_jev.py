@@ -281,3 +281,22 @@ def test_redaction_strips_secrets_from_state() -> None:
     state = captured["body"]["state"]
     assert "SHOULD_NOT_LEAK" not in state
     assert "secret-value" not in state
+
+
+def test_systemone_questions_match_documented_format() -> None:
+    """docs.typesafe.ai/primitives: choice/score need instructions + criteria."""
+    from aegis.jev.questions import build_systemone_questions
+
+    questions = build_systemone_questions()
+    for question in questions.values():
+        assert isinstance(question["instructions"], str) and question["instructions"]
+        assert "options" not in question and "levels" not in question
+    choice = questions["alignment"]
+    assert choice["type"] == "choice"
+    assert set(choice["criteria"]) == {"aligned_long", "aligned_short", "mixed", "insufficient"}
+    score = questions["evidence_adequacy"]
+    assert score["type"] == "score"
+    assert isinstance(score["criteria"], list) and 2 <= len(score["criteria"]) <= 10
+    noul = questions["long_entry_supported"]
+    assert noul["type"] == "noul"
+    assert set(noul["criteria"]) == {"true", "false"}
