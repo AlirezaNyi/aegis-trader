@@ -73,6 +73,8 @@ class FixtureMarketDataPort(MarketDataPort):
         interval: Timeframe,
         *,
         limit: int = 100,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
     ) -> Sequence[Candle]:
         matched = [
             c
@@ -81,6 +83,10 @@ class FixtureMarketDataPort(MarketDataPort):
             and c.instrument.market_type == instrument.market_type
             and c.interval == interval
         ]
+        if start_time is not None:
+            matched = [c for c in matched if c.open_time >= start_time]
+        if end_time is not None:
+            matched = [c for c in matched if c.open_time <= end_time]
         return matched[-limit:]
 
     def stream_events(self) -> Sequence[NormalizedMarketEvent]:

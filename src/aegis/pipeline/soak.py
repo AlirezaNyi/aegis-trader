@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from aegis.config.settings import Settings, TradingMode
 from aegis.interfaces.market_data import MarketDataPort
 from aegis.logging import get_logger
+from aegis.market_data.timeutil import interval_to_milliseconds
 from aegis.ops.shutdown import ShutdownGate
 from aegis.pipeline.activity import ActivityStage, ActivityState
 from aegis.pipeline.cycle import PaperCycleDeps, PaperCycleResult, run_paper_cycle
@@ -31,6 +32,8 @@ class CandleFetcher(Protocol):
         interval: Timeframe,
         *,
         limit: int = 100,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
     ) -> list[Candle] | tuple[Candle, ...]:
         """Return candles newest-last or unordered; runner sorts by open_time."""
 
@@ -58,6 +61,9 @@ class PaperSoakRunner:
     _last_final_open: dict[str, datetime] = field(default_factory=dict, init=False)
     cycles_run: int = field(default=0, init=False)
     last_outcome: SoakPollOutcome | None = field(default=None, init=False)
+    last_outcomes_by_symbol: dict[str, SoakPollOutcome] = field(
+        default_factory=dict, init=False
+    )
 
     def __post_init__(self) -> None:
         if not self.instruments:
@@ -126,6 +132,8 @@ class PaperSoakRunner:
         last_run: SoakPollOutcome | None = None
         for instrument in self.instruments:
             outcome = await self._poll_one_symbol(instrument, clock)
+            if outcome.symbol is not None:
+                self.last_outcomes_by_symbol[outcome.symbol] = outcome
             if outcome.ran_cycle:
                 last_run = outcome
             else:
@@ -144,11 +152,14 @@ class PaperSoakRunner:
     ) -> SoakPollOutcome:
         symbol = instrument.symbol
         self._set_activity(ActivityStage.FETCHING, symbol=symbol, detail="klines")
+        interval_ms = interval_to_milliseconds(self.timeframe.value)
+        start_time = clock - timedelta(milliseconds=interval_ms * self.candle_limit)
         try:
             raw = self.market_data.get_candles(
                 instrument,
                 self.timeframe,
                 limit=self.candle_limit,
+                start_time=start_time,
             )
             candles = sorted(list(raw), key=lambda c: c.open_time)
         except Exception as exc:  # noqa: BLE001 — network/parse: skip, no order retry

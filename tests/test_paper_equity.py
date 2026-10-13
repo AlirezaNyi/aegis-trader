@@ -67,6 +67,35 @@ def test_daily_loss_and_drawdown_and_cooldown() -> None:
     assert snap1.cooldown_active is True
 
 
+def test_cooldown_survives_utc_midnight_for_approved_24h() -> None:
+    """RP-COOLDOWN-AFTER-LOSS is 24h; UTC day rollover must not clear it early."""
+    tracker = PaperEquityTracker()
+    near_eod = datetime(2026, 10, 9, 23, 50, tzinfo=UTC)
+    tracker.observe(Decimal("10"), now=near_eod, daily_loss_limit=Decimal("2.2"))
+    tripped = tracker.observe(
+        Decimal("7"),
+        now=near_eod + timedelta(minutes=1),
+        daily_loss_limit=Decimal("2.2"),
+    )
+    assert tripped.cooldown_active is True
+
+    just_after_midnight = datetime(2026, 10, 10, 0, 1, tzinfo=UTC)
+    after_day = tracker.observe(
+        Decimal("7"),
+        now=just_after_midnight,
+        daily_loss_limit=Decimal("2.2"),
+    )
+    assert after_day.cooldown_active is True
+    assert after_day.daily_loss == Decimal("0")  # new UTC day accounting
+
+    after_24h = tracker.observe(
+        Decimal("7"),
+        now=near_eod + timedelta(minutes=1) + timedelta(hours=24),
+        daily_loss_limit=Decimal("2.2"),
+    )
+    assert after_24h.cooldown_active is False
+
+
 def test_build_context_uses_tracker_not_zeros() -> None:
     ledger = PaperLedger()
     ledger.set_balance(Decimal("10"))

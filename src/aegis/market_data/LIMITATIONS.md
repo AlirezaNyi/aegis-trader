@@ -12,6 +12,10 @@ Verified against official Toobit docs on 2026-10-09 (Phase 2 re-check):
 * Supported Aegis intervals: `1m`, `5m`, `15m`.
 * Spot symbols come from `exchangeInfo.symbols`; Futures from `exchangeInfo.contracts`.
 * WS control message rate limit is 5 messages/second (client should not spam ping/sub).
+* `MarketDataGateway.get_candles` returns the REST batch unchanged (no stream-duplicate
+  filtering). Only the newest candle updates the freshness tracker. REST polls do not
+  append to the optional event buffer; when a buffer is used it is capped (deque maxlen
+  1024, engineering).
 
 ## Unverified / deferred
 

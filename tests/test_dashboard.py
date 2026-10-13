@@ -133,3 +133,56 @@ def test_activity_exposed_on_dashboard() -> None:
     body = client.get("/ops/dashboard").json()
     assert body["activity"]["stage"] == "analysts"
     assert body["activity"]["symbol"] == "ADAUSDT"
+
+
+def test_dashboard_skip_does_not_overwrite_last_cycle_with_journal() -> None:
+    """A skipped poll must not pull an unrelated journal summary into last_cycle."""
+    from aegis.interfaces.market_data import NullMarketDataPort
+    from aegis.pipeline.soak import PaperSoakRunner, SoakPollOutcome
+    from aegis.schemas.common import MarketType, Timeframe
+    from aegis.schemas.market import InstrumentRef
+
+    app = create_app(_settings())
+    journal: PaperCycleJournal = app.state.paper_journal
+    open_time = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
+    journal.append(
+        build_review_record(
+            correlation_id="older-cycle",
+            symbol="ADAUSDT",
+            timeframe="1m",
+            final_open_time=open_time,
+            summary={"owner_hint": "prior full cycle"},
+            proposal_action="NO_TRADE",
+            proposal_direction=None,
+            risk_decision="REJECT",
+            entry_price=Decimal("0.50"),
+            stop_loss=None,
+            take_profit=None,
+            paper_order_id=None,
+        )
+    )
+    runner = PaperSoakRunner(
+        market_data=NullMarketDataPort(),
+        deps=app.state.paper_cycle_deps,
+        instruments=(InstrumentRef(market_type=MarketType.SPOT, symbol="ADAUSDT"),),
+        timeframe=Timeframe.M1,
+        journal=journal,
+    )
+    runner.last_outcome = SoakPollOutcome(
+        ran_cycle=False,
+        skipped_reason="already_processed",
+        final_open_time=open_time,
+        symbol="ADAUSDT",
+    )
+    runner.last_outcomes_by_symbol["ADAUSDT"] = runner.last_outcome
+    app.state.paper_soak_runner = runner
+
+    body = TestClient(app).get("/ops/dashboard").json()
+    assert body["last_cycle"]["ran_cycle"] is False
+    assert body["last_cycle"]["skipped_reason"] == "already_processed"
+    assert body["last_cycle"].get("from_journal") is not True
+    assert body["last_cycle"]["cycle"] is None
+    assert "ADAUSDT" in body["last_outcomes_by_symbol"]
+    assert body["last_outcomes_by_symbol"]["ADAUSDT"]["skipped_reason"] == (
+        "already_processed"
+    )

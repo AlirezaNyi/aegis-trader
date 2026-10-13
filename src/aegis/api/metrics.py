@@ -40,6 +40,10 @@ def paper_last_cycle(request: Request) -> dict[str, Any]:
                 "or run scripts/paper_soak.py --once"
             ),
         }
+    by_symbol = {
+        symbol: summarize_soak_outcome(outcome)
+        for symbol, outcome in runner.last_outcomes_by_symbol.items()
+    }
     if runner.last_outcome is None:
         return {
             "available": False,
@@ -47,6 +51,7 @@ def paper_last_cycle(request: Request) -> dict[str, Any]:
             "cycles_run": runner.cycles_run,
             "symbols": runner.symbols,
             "timeframe": runner.timeframe.value,
+            "last_outcomes_by_symbol": by_symbol,
         }
     return {
         "available": True,
@@ -54,4 +59,5 @@ def paper_last_cycle(request: Request) -> dict[str, Any]:
         "symbols": runner.symbols,
         "timeframe": runner.timeframe.value,
         "outcome": summarize_soak_outcome(runner.last_outcome),
+        "last_outcomes_by_symbol": by_symbol,
     }

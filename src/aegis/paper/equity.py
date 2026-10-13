@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
 from aegis.paper.ledger import PaperLedger
 from aegis.schemas.market import InstrumentRef
+
+# Owner-approved RP-COOLDOWN-AFTER-LOSS value from risk/owner_v1.py — do not invent.
+_APPROVED_COOLDOWN_AFTER_LOSS = timedelta(hours=24)
 
 
 def instrument_mark_key(instrument: InstrumentRef) -> str:
@@ -53,6 +56,7 @@ class PaperEquityTracker:
     day_start_equity: Decimal | None = None
     day_utc: date | None = None
     cooldown_active: bool = False
+    cooldown_until: datetime | None = None
 
     def observe(
         self,
@@ -73,8 +77,12 @@ class PaperEquityTracker:
         elif self.day_utc != today:
             self.day_utc = today
             self.day_start_equity = equity
-            # New UTC day clears cooldown from prior session loss.
+            # UTC day rollover resets daily-loss accounting only.
+            # Cooldown uses the approved 24h window (see cooldown_until).
+
+        if self.cooldown_until is not None and now >= self.cooldown_until:
             self.cooldown_active = False
+            self.cooldown_until = None
 
         if equity > self.peak_equity:
             self.peak_equity = equity
@@ -89,6 +97,9 @@ class PaperEquityTracker:
 
         if daily_loss_limit is not None and daily_loss > daily_loss_limit:
             self.cooldown_active = True
+            until = now + _APPROVED_COOLDOWN_AFTER_LOSS
+            if self.cooldown_until is None or until > self.cooldown_until:
+                self.cooldown_until = until
 
         return PaperEquitySnapshot(
             equity=equity,

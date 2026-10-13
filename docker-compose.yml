@@ -45,8 +45,8 @@ services:
       - .env
     environment:
       # Hard safety gates for Compose deploys — cannot be armed via .env alone.
-      #AEGIS_TRADING_MODE: paper
-      #AEGIS_LIVE_ARMED: "false"
+      AEGIS_TRADING_MODE: paper
+      AEGIS_LIVE_ARMED: "false"
       AEGIS_REQUIRE_DATABASE: "true"
       # Must use Compose DNS name `postgres`, not localhost from host .env.
       DATABASE_URL: postgresql+psycopg://aegis:aegis@postgres:5432/aegis

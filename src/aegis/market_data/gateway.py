@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Sequence
 from datetime import datetime
 
 from aegis.interfaces.clock import Clock, SystemClock
 from aegis.interfaces.market_data import MarketDataPort
 from aegis.market_data.metrics import MarketDataMetrics
-from aegis.market_data.quality import CandleStreamTracker, DataQualityIssueKind
+from aegis.market_data.quality import CandleStreamTracker
 from aegis.market_data.rest_client import ToobitRestMarketDataClient
 from aegis.schemas.common import Timeframe
 from aegis.schemas.market import Candle, InstrumentRef, NormalizedMarketEvent
 from aegis.schemas.metadata import SymbolMetadata
+
+# Engineering cap for optional WS-side event buffer — not a risk-policy value.
+_EVENT_BUFFER_MAXLEN = 1024
 
 
 class MarketDataGateway(MarketDataPort):
@@ -23,13 +27,18 @@ class MarketDataGateway(MarketDataPort):
         metrics: MarketDataMetrics | None = None,
         tracker: CandleStreamTracker | None = None,
         clock: Clock | None = None,
-        event_buffer: list[NormalizedMarketEvent] | None = None,
+        event_buffer: list[NormalizedMarketEvent] | deque[NormalizedMarketEvent] | None = None,
     ) -> None:
         self._rest = rest
         self.metrics = metrics or MarketDataMetrics()
         self.tracker = tracker or CandleStreamTracker()
         self._clock = clock or SystemClock()
-        self._events = event_buffer if event_buffer is not None else []
+        if event_buffer is None:
+            self._events: deque[NormalizedMarketEvent] = deque(maxlen=_EVENT_BUFFER_MAXLEN)
+        elif isinstance(event_buffer, deque):
+            self._events = event_buffer
+        else:
+            self._events = deque(event_buffer, maxlen=_EVENT_BUFFER_MAXLEN)
         self._metadata_cache: list[SymbolMetadata] | None = None
 
     def refresh_metadata(self) -> list[SymbolMetadata]:
@@ -50,43 +59,28 @@ class MarketDataGateway(MarketDataPort):
         start_time: datetime | None = None,
         end_time: datetime | None = None,
     ) -> Sequence[Candle]:
-        candles = self._rest.get_klines(
-            instrument,
-            interval,
-            limit=limit,
-            start_time=start_time,
-            end_time=end_time,
+        # REST historical batches are returned as-is. Stream tracker duplicate
+        # filtering is for incremental WS paths only — applying it here drops the
+        # previous newest bar on re-poll and gaps the soak window.
+        candles = list(
+            self._rest.get_klines(
+                instrument,
+                interval,
+                limit=limit,
+                start_time=start_time,
+                end_time=end_time,
+            )
         )
-        accepted: list[Candle] = []
         for candle in candles:
             self.metrics.record_event(
                 received_at=candle.received_at,
                 exchange_event_at=candle.open_time,
             )
-            issues = self.tracker.observe(candle)
-            for issue in issues:
-                if issue.kind == DataQualityIssueKind.GAP:
-                    self.metrics.record_gap()
-                elif issue.kind == DataQualityIssueKind.DUPLICATE:
-                    self.metrics.record_duplicate()
-                elif issue.kind == DataQualityIssueKind.OUT_OF_ORDER:
-                    self.metrics.record_out_of_order()
-            if not any(i.kind == DataQualityIssueKind.DUPLICATE for i in issues):
-                accepted.append(candle)
-            self._events.append(
-                NormalizedMarketEvent(
-                    market_type=instrument.market_type,
-                    symbol=instrument.symbol,
-                    event_time=candle.open_time,
-                    received_at=candle.received_at,
-                    channel=f"kline_{interval.value}",
-                    payload={
-                        "open_time": candle.open_time.isoformat(),
-                        "is_final": candle.is_final,
-                    },
-                )
-            )
-        return accepted
+        # Freshness uses the newest open_time only — do not observe the whole batch
+        # (would spam gap/out-of-order metrics on every historical re-fetch).
+        if candles:
+            self.tracker.observe(candles[-1])
+        return candles
 
     def stream_events(self) -> Sequence[NormalizedMarketEvent]:
         return list(self._events)

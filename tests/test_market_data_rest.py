@@ -162,6 +162,24 @@ def test_klines_finalization_and_gateway_quality() -> None:
     assert snap["stale"] is False
 
 
+def test_gateway_rest_repoll_keeps_previous_newest_bar() -> None:
+    """Historical REST batches must not drop the prior tip via stream-duplicate filter."""
+    transport = httpx.MockTransport(_handler)
+    http = httpx.Client(transport=transport, base_url="https://api.toobit.com")
+    clock: Clock = FixedClock(datetime(2024, 1, 1, 0, 2, 30, tzinfo=UTC))
+    rest = ToobitRestMarketDataClient(client=http, clock=clock)
+    gateway = MarketDataGateway(rest, clock=clock)
+    instrument = InstrumentRef(market_type=MarketType.SPOT, symbol="ETHUSDT")
+    first = list(gateway.get_candles(instrument, Timeframe.M1, limit=3))
+    second = list(gateway.get_candles(instrument, Timeframe.M1, limit=3))
+    assert len(first) == 3
+    assert len(second) == 3
+    assert [c.open_time for c in first] == [c.open_time for c in second]
+    assert gateway.stream_events() == []
+    snap = gateway.freshness(symbol="ETHUSDT", interval=Timeframe.M1)
+    assert snap["stale"] is False
+
+
 def test_malformed_kline_raises() -> None:
     def bad_handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/quote/v1/klines"):

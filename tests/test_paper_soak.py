@@ -65,6 +65,8 @@ class FakeMarketData:
     def __init__(self, candles: list[Candle]) -> None:
         self.candles = candles
         self.calls = 0
+        self.last_start_time: datetime | None = None
+        self.last_limit: int | None = None
 
     def get_candles(
         self,
@@ -72,9 +74,13 @@ class FakeMarketData:
         interval: Timeframe,
         *,
         limit: int = 100,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
     ) -> list[Candle]:
-        _ = instrument, interval, limit
+        _ = instrument, interval, end_time
         self.calls += 1
+        self.last_start_time = start_time
+        self.last_limit = limit
         return list(self.candles)
 
 
@@ -111,6 +117,28 @@ async def test_soak_debounce_same_final_bar() -> None:
     assert second.skipped_reason == "already_processed"
     assert runner.cycles_run == 1
     assert md.calls == 2
+    assert md.last_start_time is not None
+    assert md.last_limit == 100
+    assert now - md.last_start_time == timedelta(minutes=100)
+
+
+@pytest.mark.asyncio
+async def test_soak_passes_start_time_window() -> None:
+    start = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
+    candles = [_candle(start + timedelta(minutes=i)) for i in range(25)]
+    now = candles[-1].received_at + timedelta(milliseconds=100)
+    md = FakeMarketData(candles)
+    runner = PaperSoakRunner(
+        market_data=md,  # type: ignore[arg-type]
+        deps=_deps(),
+        instruments=(_instrument(),),
+        timeframe=Timeframe.M1,
+        candle_limit=40,
+    )
+    await runner.poll_once(now=now)
+    assert md.last_start_time is not None
+    assert now - md.last_start_time == timedelta(minutes=40)
+    assert md.last_limit == 40
 
 
 @pytest.mark.asyncio
@@ -201,8 +229,10 @@ async def test_soak_multi_symbol_runs_each_new_bar() -> None:
             interval: Timeframe,
             *,
             limit: int = 100,
+            start_time: datetime | None = None,
+            end_time: datetime | None = None,
         ) -> list[Candle]:
-            _ = interval, limit
+            _ = interval, limit, start_time, end_time
             self.calls += 1
             return list(self.by_symbol[instrument.symbol])
 
@@ -219,6 +249,8 @@ async def test_soak_multi_symbol_runs_each_new_bar() -> None:
     assert runner.cycles_run == 2
     assert md.calls == 2
     assert runner.symbols == ["ADAUSDT", "BTCUSDT"]
+    assert set(runner.last_outcomes_by_symbol) == {"ADAUSDT", "BTCUSDT"}
+    assert all(o.ran_cycle for o in runner.last_outcomes_by_symbol.values())
 
 
 def test_parse_soak_symbols_csv_and_cap() -> None:

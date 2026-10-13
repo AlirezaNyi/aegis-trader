@@ -15,6 +15,7 @@
 ## Gaps
 
 * No automatic emergency cancel/close (ADR 0006)
-* Numeric risk-policy limits remain UNAPPROVED — Order Manager does not invent them
+* Owner risk policy **v1.0** is APPROVED for paper enforcement; live remains disarmed.
+  Order Manager does not invent numeric limits — it honors Risk decisions only.
 * Position / balance account-level reconcile is not part of Order Manager
 * Live client construction left to parent (`build_execution_port`); `create_app` keeps `NullExecutionPort` / `live_submit_client=not_constructed`

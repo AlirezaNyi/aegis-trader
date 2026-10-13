@@ -24,7 +24,7 @@ Passing tests do not establish profitability or guarantee safety.
 | --- | --- | --- |
 | 1 | No model/agent bypass of Risk Engine | **PASS** |
 | 2 | Live disabled by default; no implicit activation | **PASS** |
-| 3 | Missing/stale critical data blocks new orders | **PASS** (draft UNAPPROVED + integrity hard-fails; continuous `validation` stage still stubbed) |
+| 3 | Missing/stale critical data blocks new orders | **PASS** (integrity hard-fails; batch `validate_candles` wired in `run_paper_cycle`; continuous tracker persistence across restarts still deferred) |
 | 4 | Ambiguous submit → reconcile, not blind retry | **PASS** |
 | 5 | Duplicate order prevention | **PASS** (clientOrderId + attempt tracker; RP duplicate window when approved) |
 | 6 | Credentials inaccessible to analysts/Jev/LLM | **PASS** (M5 remediated: no full Settings on `app.state`; host/env T-11 remains) |
@@ -62,7 +62,7 @@ None for paper posture. Live activation remains owner-blocked by design (UNAPPRO
 
 | ID | Finding | Evidence |
 | --- | --- | --- |
-| L1 | Pipeline `validation` stage stubbed; RiskContext population is caller-owned | `AGENTS.md`; no tick loop in `create_app` |
+| L1 | Batch candle validation implemented; RiskContext population is caller-owned; continuous tracker not persisted across restarts | `validation/stage.py`, `validation/LIMITATIONS.md`; optional paper soak in `create_app` (default off) |
 | L2 | Ops counters may stay zero until call sites record events | `ops/LIMITATIONS.md` |
 | L3 | Futures qty/hedge-mode and testnet still unresolved | `exchange/LIMITATIONS.md`, `API_CONTRACTS.md` |
 | L4 | Backtest `skip_risk` research path is paper-only | `backtest/runner.py` |
@@ -119,7 +119,7 @@ Paper soak on target host is appropriate. Live remains a separate owner decision
 * Whether emergencies may auto-cancel or auto-close.
 * Account inventory REST (balances/positions) for full reconcile.
 * Futures quantity unit / hedge-mode / testnet verification.
-* Continuous decision-loop wiring with populated RiskContext (no tick loop in `create_app` today).
+* Continuous decision-loop wiring with populated RiskContext (optional paper soak exists in `create_app`, default off via `AEGIS_PAPER_SOAK_ENABLED`).
 * Host compromise or Settings serialization → secret exposure.
 
 ---

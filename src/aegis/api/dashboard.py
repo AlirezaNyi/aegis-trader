@@ -13,9 +13,38 @@ from aegis.paper.ledger import PaperLedger
 from aegis.pipeline.activity import ActivityState
 from aegis.pipeline.journal import PaperCycleJournal
 from aegis.pipeline.review import summarize_soak_outcome
-from aegis.pipeline.soak import PaperSoakRunner
+from aegis.pipeline.soak import PaperSoakRunner, SoakPollOutcome
 
 router = APIRouter(tags=["dashboard"])
+
+
+def _outcome_correlation_id(outcome: SoakPollOutcome) -> str | None:
+    if outcome.result is None:
+        return None
+    return outcome.result.correlation_id
+
+
+def _matching_journal_review(
+    reviews: list[dict[str, Any]],
+    *,
+    symbol: str | None,
+    final_open_time: str | None,
+    correlation_id: str | None,
+) -> dict[str, Any] | None:
+    """Pick the journal row that matches the soak outcome, if any."""
+    for review in reviews:
+        if symbol is not None and review.get("symbol") != symbol:
+            continue
+        if correlation_id is not None and review.get("correlation_id") == correlation_id:
+            return review
+        review_open = review.get("final_open_time")
+        if (
+            final_open_time is not None
+            and review_open is not None
+            and str(review_open) == str(final_open_time)
+        ):
+            return review
+    return None
 
 _HTML_PATH = Path(__file__).resolve().parent / "static" / "dashboard.html"
 
@@ -63,15 +92,26 @@ def dashboard_payload(request: Request) -> dict[str, Any]:
     )
 
     last_cycle: dict[str, Any] | None = None
-    if runner is not None and runner.last_outcome is not None:
-        last_cycle = summarize_soak_outcome(runner.last_outcome)
-        # Prefer detailed journal summary when available.
-        if reviews:
-            last_cycle = {
-                **last_cycle,
-                "cycle": reviews[0].get("summary"),
-                "from_journal": True,
-            }
+    last_outcomes_by_symbol: dict[str, Any] = {}
+    if runner is not None:
+        for symbol, outcome in runner.last_outcomes_by_symbol.items():
+            last_outcomes_by_symbol[symbol] = summarize_soak_outcome(outcome)
+        if runner.last_outcome is not None:
+            last_cycle = summarize_soak_outcome(runner.last_outcome)
+            # Merge journal only for a matching ran cycle — never overwrite a skip.
+            if last_cycle["ran_cycle"] and reviews:
+                matched = _matching_journal_review(
+                    reviews,
+                    symbol=last_cycle.get("symbol"),
+                    final_open_time=last_cycle.get("final_open_time"),
+                    correlation_id=_outcome_correlation_id(runner.last_outcome),
+                )
+                if matched is not None:
+                    last_cycle = {
+                        **last_cycle,
+                        "cycle": matched.get("summary"),
+                        "from_journal": True,
+                    }
 
     paper_account = _paper_account_snapshot(
         ledger=ledger,
@@ -108,6 +148,7 @@ def dashboard_payload(request: Request) -> dict[str, Any]:
             else activity.snapshot()
         ),
         "last_cycle": last_cycle,
+        "last_outcomes_by_symbol": last_outcomes_by_symbol,
         "reviews": reviews,
         "signals": signals,
         "signal_aggregate": aggregate,
