@@ -262,23 +262,45 @@ class BacktestRunner:
         prior_qty: Decimal,
         prior_entry: Decimal | None,
     ) -> None:
-        side_u = side.strip().upper()
-        if side_u == "BUY":
-            if prior_entry is None or prior_qty <= 0:
-                acc.open_entry = price
-                acc.open_qty = qty
-            else:
-                new_qty = prior_qty + qty
-                acc.open_entry = ((prior_entry * prior_qty) + (price * qty)) / new_qty
-                acc.open_qty = new_qty
-            return
-        if side_u == "SELL" and prior_qty > 0 and prior_entry is not None:
-            close_qty = min(qty, prior_qty)
-            gross = (price - prior_entry) * close_qty
-            acc.trade_pnls.append(gross - fee)
-            acc.open_qty = prior_qty - close_qty
-            if acc.open_qty == 0:
-                acc.open_entry = None
+        record_trade_pnl(
+            acc,
+            side=side,
+            qty=qty,
+            price=price,
+            fee=fee,
+            prior_qty=prior_qty,
+            prior_entry=prior_entry,
+        )
+
+
+def record_trade_pnl(
+    acc: _WindowAccumulator,
+    *,
+    side: str,
+    qty: Decimal,
+    price: Decimal,
+    fee: Decimal,
+    prior_qty: Decimal,
+    prior_entry: Decimal | None,
+) -> None:
+    """Average-cost long PnL accounting shared by candle and pipeline replays."""
+    side_u = side.strip().upper()
+    if side_u == "BUY":
+        if prior_entry is None or prior_qty <= 0:
+            acc.open_entry = price
+            acc.open_qty = qty
+        else:
+            new_qty = prior_qty + qty
+            acc.open_entry = ((prior_entry * prior_qty) + (price * qty)) / new_qty
+            acc.open_qty = new_qty
+        return
+    if side_u == "SELL" and prior_qty > 0 and prior_entry is not None:
+        close_qty = min(qty, prior_qty)
+        gross = (price - prior_entry) * close_qty
+        acc.trade_pnls.append(gross - fee)
+        acc.open_qty = prior_qty - close_qty
+        if acc.open_qty == 0:
+            acc.open_entry = None
 
 
 def _auto_approve(intent: OrderIntent, now: datetime, *, policy: str) -> RiskDecision:

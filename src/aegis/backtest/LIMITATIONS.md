@@ -5,7 +5,10 @@
 * Deterministic candle replay with fixed seed, dataset/strategy versioning, and
   explicit train / validation / OOS time windows.
 * Fills route through `PaperBroker` (`ledger_kind=paper`). No exchange order calls.
-* Strategy hooks are test/simple callables — not the full analyst → supervisor → risk pipeline.
+* `BacktestRunner` strategy hooks are test/simple callables — not the full pipeline.
+* `replay_pipeline` (`pipeline_replay.py`, script `scripts/backtest_pipeline.py`) replays
+  stored final candles through the full `run_paper_cycle` (features → analysts →
+  evidence → Jev → Supervisor → Risk → PaperBroker). See "Full-pipeline replay" below.
 
 ## Cost model (simulation assumptions)
 
@@ -34,3 +37,27 @@
 
 * `BacktestRunner` refuses `trading_mode=live`.
 * Live submit remains disabled until owner approval and Phase 7 adapter work.
+
+## Full-pipeline replay (`replay_pipeline`)
+
+* One `run_paper_cycle` per final bar, sorted by `open_time`; non-final bars are dropped;
+  the trailing `window_candles` final bars with `close_time <= bar.close_time` are passed.
+* `received_at` is rewritten to `close_time` and the cycle clock is `close_time + 1ms`,
+  so freshness (RP-DATA-FRESHNESS-MS) passes for contiguous history. Gaps in stored
+  candles still block validation (REJECT) — counted in `assumptions.counters`.
+* **Spread:** historical order-book spread is not stored. `spread_bps` is a required
+  argument; any value is a constant **assumption** recorded in `uncertainty_notes`.
+  `None` = unobserved → Risk rejects every trade (RP-MAX-SPREAD / RP-MIN-LIQUIDITY).
+* **LLM / Jev:** caller-provided ports. Default script uses `UnavailableLlmPort` and
+  `UnavailableJevPort` → NO_TRADE every bar (zero trades). `--use-live-llm` uses the
+  owner-configured provider wrapped in `CappedLlmPort` (whole-run cap, required
+  `--max-llm-calls`). Jev is always Unavailable in the script (no historical Jev).
+  The owner `DailyCallLimiter` resets per *historical* UTC day, hence the extra cap.
+  Live LLM outputs are non-deterministic; results are not reproducible.
+* **Fill model:** PaperBroker immediate full fill at the decision bar's close ±
+  configured slippage; no queue position, latency, partial fills, or next-bar open.
+* **Exits:** whatever the Supervisor/Risk path produces; there is no stop/take-profit
+  simulation inside bars. Open positions at window end are marked at last close.
+* Per-window isolation: train / validation / OOS each get their own `PaperBroker`,
+  `PaperLedger`, `PaperEquityTracker`, and `ProposalHistory`.
+* Refuses `trading_mode=live` (and any non paper/development mode).

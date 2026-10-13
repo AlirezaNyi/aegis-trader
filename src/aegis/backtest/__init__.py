@@ -2,6 +2,12 @@
 
 from aegis.backtest.costs import CostModel
 from aegis.backtest.metrics import compute_window_metrics
+from aegis.backtest.pipeline_replay import (
+    CappedLlmPort,
+    LlmCallCapExceeded,
+    PipelineReplayError,
+    replay_pipeline,
+)
 from aegis.backtest.replay import CandleReplay, LookAheadError
 from aegis.backtest.runner import (
     SOFTWARE_VERSION,
@@ -17,9 +23,12 @@ __all__ = [
     "SOFTWARE_VERSION",
     "BacktestRunReport",
     "BacktestRunner",
+    "CappedLlmPort",
     "CandleReplay",
     "CostModel",
+    "LlmCallCapExceeded",
     "LookAheadError",
+    "PipelineReplayError",
     "RiskGate",
     "SplitWindows",
     "StrategyHook",
@@ -27,4 +36,5 @@ __all__ = [
     "always_flat",
     "buy_hold_one_bar_factory",
     "compute_window_metrics",
+    "replay_pipeline",
 ]
