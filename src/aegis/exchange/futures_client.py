@@ -28,7 +28,7 @@ class ToobitFuturesExecutionClient:
         *,
         api_key: str,
         api_secret: str,
-        client: httpx.Client | None = None,
+        client: httpx.AsyncClient | None = None,
         base_url: str = REST_BASE_URL,
         recv_window_ms: int = 5000,
         timeout_seconds: float = 10.0,
@@ -41,21 +41,32 @@ class ToobitFuturesExecutionClient:
         self._recv_window_ms = recv_window_ms
         self._category = category
         self._owns_client = client is None
-        self._client = client or httpx.Client(
+        self._client = client or httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             timeout=timeout_seconds,
         )
         self._intents: dict[str, OrderIntent] = {}
         self._orders: dict[str, Order] = {}
 
-    def close(self) -> None:
+    async def aclose(self) -> None:
+        """Close the owned AsyncClient. An injected client is owned by the caller."""
         if self._owns_client:
-            self._client.close()
+            await self._client.aclose()
+
+    async def __aenter__(self) -> ToobitFuturesExecutionClient:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        await self.aclose()
+
+    def knows(self, client_order_id: str) -> bool:
+        """True when this client holds a local intent or order for the id."""
+        return client_order_id in self._intents or client_order_id in self._orders
 
     def remember_intent(self, intent: OrderIntent) -> None:
         self._intents[intent.client_order_id] = intent
 
-    def submit(self, intent: OrderIntent) -> Order:
+    async def submit(self, intent: OrderIntent) -> Order:
         ensure_live_intent(intent)
         if intent.instrument.market_type != MarketType.FUTURES:
             raise ExchangeError(
@@ -80,7 +91,7 @@ class ToobitFuturesExecutionClient:
 
         self.remember_intent(intent)
         path = VERIFIED_SUBMIT_PATHS["futures_order"]
-        response = signed_v2_json_post(
+        response = await signed_v2_json_post(
             self._client,
             path=path,
             api_key=self._api_key,
@@ -125,9 +136,9 @@ class ToobitFuturesExecutionClient:
         self._orders[intent.client_order_id] = order
         return order
 
-    def cancel(self, client_order_id: str) -> Order:
+    async def cancel(self, client_order_id: str) -> Order:
         path = VERIFIED_QUERY_PATHS["futures_cancel_order"]
-        response = signed_v2_query(
+        response = await signed_v2_query(
             self._client,
             method="DELETE",
             path=path,
@@ -144,14 +155,17 @@ class ToobitFuturesExecutionClient:
                 f"futures cancel HTTP {response.status_code} "
                 f"client_order_id={client_order_id!r}"
             )
-        payload = response.json()
+        try:
+            payload: Any = response.json()
+        except ValueError as exc:
+            raise ExchangeError("futures cancel response is not JSON") from exc
         if not isinstance(payload, dict):
             raise ExchangeError("futures cancel response must be an object")
         return self._apply_payload(client_order_id, payload)
 
-    def get_order(self, client_order_id: str) -> Order | None:
+    async def get_order(self, client_order_id: str) -> Order | None:
         path = VERIFIED_QUERY_PATHS["futures_get_order"]
-        response = signed_v2_query(
+        response = await signed_v2_query(
             self._client,
             method="GET",
             path=path,
@@ -168,7 +182,7 @@ class ToobitFuturesExecutionClient:
         if response.status_code >= 400:
             try:
                 body = response.json()
-            except Exception:
+            except ValueError:  # JSONDecodeError / UnicodeDecodeError subclass ValueError
                 body = None
             code = body.get("code") if isinstance(body, dict) else None
             if code in (-2013, 2013, "-2013"):
@@ -177,7 +191,10 @@ class ToobitFuturesExecutionClient:
                 f"futures get_order HTTP {response.status_code} "
                 f"client_order_id={client_order_id!r}"
             )
-        payload = response.json()
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ExchangeError("futures get_order response is not JSON") from exc
         if not isinstance(payload, dict):
             raise ExchangeError("futures get_order response must be an object")
         # Empty / not-found style success envelopes

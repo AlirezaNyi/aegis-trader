@@ -6,6 +6,17 @@
 * Live gates via `assert_live_execution_allowed` / kill switch / `trading_ready`
 * `ledger_kind=LIVE` only — paper refused
 * Idempotent one submit attempt per `client_order_id`
+* Async: `await OrderManager.submit(...)` / `await cancel(...)`. An `asyncio.Lock`
+  (`OrderManager.lock`) is held across the gate re-check, block check, idempotency
+  check, `SUBMIT_ATTEMPTED` placeholder write, the network call and the post-ambiguity
+  reconcile, so (a) two concurrent submits for the same `client_order_id` reach the
+  adapter at most once and (b) a submit queued behind an ambiguous one sees the
+  resulting block and never reaches the adapter. Live submits are therefore
+  serialized per manager (intended). Risk/bind/gate checks also run once before
+  waiting so REJECT decisions never queue.
+* Task cancellation (`asyncio.CancelledError`) during the network call marks the
+  order `UNKNOWN` and blocks new submits (no reconcile is attempted while cancelled);
+  the cancellation is re-raised.
 * Ambiguous submit → `UNKNOWN` → reconciler (`get_order`); new submits blocked;
   never blind second submit. Ambiguous = timeout / transport / HTTP 5xx / HTTP 429
   (`RateLimitedSubmitError` or a bare `RateLimitError`) / non-2xx without a
@@ -30,6 +41,15 @@
   `MISSING`) cancel result blocks new submits until reconciled. Cancel exceptions
   propagate to the caller and leave local state unchanged
 * New submits blocked while any order is `UNKNOWN` **or** `MISSING` (one not-found query is not enough to reopen flow; use `allow_new_submits` only after clean state)
+* `block_new_submits` also includes the sticky reconcile-incomplete set (failed
+  reconcile queries; see `reconcile/LIMITATIONS.md`) and the state-load-failed set;
+  `_recompute_critical_flags` / `allow_new_submits` cannot clear either. A failed
+  post-ambiguous-submit reconcile also records the id as reconcile-incomplete
+* `persist.load_live_orders` raises `LiveOrderLoadError` (with `loaded` and
+  `failed_client_order_ids`) when any live row cannot be parsed (e.g. legacy side
+  such as `BUY_OPEN`); each bad row is logged by id + error class only. Startup
+  wiring must pass it to `recover_open_intents(load_error=...)` (not wired in
+  `create_app` yet — live port is not constructed)
 * Optional Postgres upsert for live rows (`persist.upsert_live_order`); refuses
   non-live `ledger_kind` (`LiveLedgerKindError`) and `TEST_ACCEPTED` orders
   (`TestOrderPersistError`) — orderTest results never enter the live ledger

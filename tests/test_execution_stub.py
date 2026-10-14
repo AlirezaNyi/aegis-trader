@@ -15,7 +15,7 @@ from aegis.schemas.market import InstrumentRef
 from aegis.schemas.orders import OrderIntent
 
 
-def test_null_execution_refuses_submit() -> None:
+async def test_null_execution_refuses_submit() -> None:
     port = NullExecutionPort()
     intent = OrderIntent(
         intent_id=uuid4(),
@@ -30,7 +30,7 @@ def test_null_execution_refuses_submit() -> None:
         created_at=datetime.now(UTC),
     )
     with pytest.raises(RuntimeError, match="null"):
-        port.submit(intent)
+        await port.submit(intent)
 
 
 def test_exchange_live_submit_supported_but_factory_defaults_null() -> None:

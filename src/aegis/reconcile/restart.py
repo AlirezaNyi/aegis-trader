@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from aegis.orders.idempotency import is_terminal
 from aegis.orders.manager import OrderManager
-from aegis.reconcile.service import Reconciler, ReconcileResult
+from aegis.orders.persist import LiveOrderLoadError
+from aegis.reconcile.service import Reconciler, ReconcileResult, ids_requiring_reconcile
 from aegis.schemas.orders import OrderIntent, OrderStatus
 
 
@@ -17,47 +17,73 @@ class RestartRecoveryResult:
     reconciled: list[ReconcileResult] = field(default_factory=list)
     blocked: bool = False
     detail: str = ""
+    errors: dict[str, str] = field(default_factory=dict)
 
 
-def recover_open_intents(
+async def recover_open_intents(
     manager: OrderManager,
     reconciler: Reconciler,
     *,
     intents: dict[str, OrderIntent] | None = None,
+    load_error: LiveOrderLoadError | None = None,
     now: datetime | None = None,
 ) -> RestartRecoveryResult:
-    """Load open intents, reconcile non-terminal / UNKNOWN before allowing submits."""
+    """Load open intents, reconcile non-terminal / UNKNOWN before allowing submits.
+
+    Runs under ``manager.lock`` so no submit can interleave. A failed query keeps
+    that order's state (UNKNOWN stays blocking), is reported in ``errors`` and sets
+    the manager's sticky reconcile-incomplete block (cleared only by a later fully
+    successful sweep / recovery). ``load_error`` (from ``load_live_orders``) marks
+    persisted live state as unloadable: new submits stay blocked for this process.
+    """
     clock = now if now is not None else datetime.now(tz=UTC)
-    if intents:
-        manager.load_intents(intents)
+    async with manager.lock:
+        if load_error is not None:
+            manager.mark_state_load_failed(load_error.failed_client_order_ids)
+        if intents:
+            manager.load_intents(intents)
 
-    results: list[ReconcileResult] = []
-    for client_order_id, order in list(manager.orders.items()):
-        if order.status == OrderStatus.UNKNOWN or not is_terminal(order.status):
-            results.append(
-                reconciler.query_and_update(manager, client_order_id, now=clock)
-            )
+        ids = ids_requiring_reconcile(manager)
+        # Also reconcile intents that have no local order yet (crash mid-submit)
+        remember = getattr(manager.execution, "remember_intent", None)
+        for client_order_id, intent in list(manager.intents.items()):
+            if client_order_id in manager.orders:
+                continue
+            if client_order_id in ids:
+                continue
+            if callable(remember):
+                remember(intent)
+            ids.append(client_order_id)
 
-    # Also reconcile intents that have no local order yet (crash mid-submit)
-    for client_order_id, intent in list(manager.intents.items()):
-        if client_order_id in manager.orders:
-            continue
-        remember = getattr(manager._execution, "remember_intent", None)
-        if callable(remember):
-            remember(intent)
-        results.append(reconciler.query_and_update(manager, client_order_id, now=clock))
+        batch = await reconciler.reconcile_ids(manager, ids, now=clock)
 
-    manager.allow_new_submits()
-    blocked = manager.block_new_submits
-    unknown_left = any(o.status == OrderStatus.UNKNOWN for o in manager.orders.values())
-    ok = not unknown_left and not blocked
+        if not batch.errors:
+            # Only a fully answered recovery may lift blocks; MISSING still blocks,
+            # and an unloadable persisted row keeps the state-load block.
+            manager.clear_reconcile_incomplete(ids)
+            manager.allow_new_submits()
+        blocked = manager.block_new_submits
+        unknown_left = any(
+            o.status == OrderStatus.UNKNOWN for o in manager.orders.values()
+        )
+    ok = (
+        not unknown_left
+        and not blocked
+        and not batch.errors
+        and not manager.state_load_failed
+    )
     return RestartRecoveryResult(
         ok=ok,
-        reconciled=results,
+        reconciled=batch.results,
         blocked=blocked,
+        errors=dict(batch.errors),
         detail=(
             "restart recovery complete"
             if ok
-            else "critical unknown remains; new submits blocked"
+            else (
+                "persisted live order state unloadable; new submits blocked"
+                if manager.state_load_failed
+                else "critical unknown / reconcile incomplete; new submits blocked"
+            )
         ),
     )

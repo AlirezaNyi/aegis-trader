@@ -92,7 +92,7 @@ def _spot(
     *,
     use_order_test: bool = False,
 ) -> ToobitSpotExecutionClient:
-    http = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.toobit.com")
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.toobit.com")
     return ToobitSpotExecutionClient(
         api_key=API_KEY, api_secret=SECRET, client=http, use_order_test=use_order_test
     )
@@ -134,14 +134,14 @@ def _filters(**kw: Any) -> SymbolFilters:
 
 
 @pytest.mark.parametrize("http_status", [200, 400])
-def test_submit_error_code_raises_typed_reject_never_new(http_status: int) -> None:
+async def test_submit_error_code_raises_typed_reject_never_new(http_status: int) -> None:
     client = _spot(
         lambda _r: httpx.Response(
             http_status, json={"code": -1131, "msg": "Balance insufficient"}
         )
     )
     with pytest.raises(ExchangeRejectError) as info:
-        client.submit(_intent(client_order_id="c-rej"))
+        await client.submit(_intent(client_order_id="c-rej"))
     assert info.value.code == -1131
     assert info.value.msg == "Balance insufficient"
     assert info.value.http_status == http_status
@@ -153,34 +153,34 @@ def test_submit_error_code_raises_typed_reject_never_new(http_status: int) -> No
     "body",
     [b"", b"<html>gateway</html>", b'{"msg": "no code"}', b"[]"],
 )
-def test_submit_4xx_without_parseable_code_is_ambiguous(
+async def test_submit_4xx_without_parseable_code_is_ambiguous(
     http_status: int, body: bytes
 ) -> None:
     client = _spot(lambda _r: httpx.Response(http_status, content=body))
     with pytest.raises(AmbiguousSubmitError):
-        client.submit(_intent())
+        await client.submit(_intent())
 
 
 @pytest.mark.parametrize("http_status", [200, 400])
 @pytest.mark.parametrize("raw_code", ["abc", None, "", [1], {"x": 1}])
-def test_submit_unparseable_code_is_ambiguous(http_status: int, raw_code: Any) -> None:
+async def test_submit_unparseable_code_is_ambiguous(http_status: int, raw_code: Any) -> None:
     client = _spot(
         lambda _r: httpx.Response(http_status, json={"code": raw_code, "msg": "x"})
     )
     with pytest.raises(AmbiguousSubmitError):
-        client.submit(_intent())
+        await client.submit(_intent())
 
 
-def test_submit_429_with_code_body_is_still_ambiguous() -> None:
+async def test_submit_429_with_code_body_is_still_ambiguous() -> None:
     client = _spot(
         lambda _r: httpx.Response(429, json={"code": -1003, "msg": "TOO_MANY_REQUESTS"})
     )
     with pytest.raises(RateLimitedSubmitError):
-        client.submit(_intent())
+        await client.submit(_intent())
 
 
 def _futures(handler: Callable[[httpx.Request], httpx.Response]) -> ToobitFuturesExecutionClient:
-    http = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.toobit.com")
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.toobit.com")
     return ToobitFuturesExecutionClient(api_key=API_KEY, api_secret=SECRET, client=http)
 
 
@@ -196,10 +196,10 @@ def _futures(handler: Callable[[httpx.Request], httpx.Response]) -> ToobitFuture
         httpx.Response(503, content=b""),
     ],
 )
-def test_futures_submit_errors_are_ambiguous(response: httpx.Response) -> None:
+async def test_futures_submit_errors_are_ambiguous(response: httpx.Response) -> None:
     client = _futures(lambda _r: response)
     with pytest.raises(AmbiguousSubmitError):
-        client.submit(_intent(market_type=MarketType.FUTURES, symbol="ETH-SWAP-USDT"))
+        await client.submit(_intent(market_type=MarketType.FUTURES, symbol="ETH-SWAP-USDT"))
 
 
 def test_is_definitive_submit_reject_classification() -> None:
@@ -215,37 +215,37 @@ def test_is_definitive_submit_reject_classification() -> None:
 
 
 @pytest.mark.parametrize("code", [-1000, -1001, -1006, -1007, -1141, -1146])
-def test_submit_execution_unknown_codes_are_ambiguous(code: int) -> None:
+async def test_submit_execution_unknown_codes_are_ambiguous(code: int) -> None:
     client = _spot(lambda _r: httpx.Response(200, json={"code": code, "msg": "x"}))
     with pytest.raises(AmbiguousSubmitError):
-        client.submit(_intent())
+        await client.submit(_intent())
 
 
-def test_submit_2xx_non_json_is_ambiguous() -> None:
+async def test_submit_2xx_non_json_is_ambiguous() -> None:
     client = _spot(lambda _r: httpx.Response(200, content=b"<html>oops</html>"))
     with pytest.raises(AmbiguousSubmitError):
-        client.submit(_intent())
+        await client.submit(_intent())
 
 
-def test_submit_ack_without_status_is_unknown_not_new() -> None:
+async def test_submit_ack_without_status_is_unknown_not_new() -> None:
     body = _ack()
     del body["status"]
     client = _spot(lambda _r: httpx.Response(200, json=body))
-    order = client.submit(_intent())
+    order = await client.submit(_intent())
     assert order.status == OrderStatus.UNKNOWN
 
 
-def test_submit_ack_ok_still_open() -> None:
+async def test_submit_ack_ok_still_open() -> None:
     client = _spot(lambda _r: httpx.Response(200, json=_ack()))
-    assert client.submit(_intent()).status == OrderStatus.OPEN
+    assert (await client.submit(_intent())).status == OrderStatus.OPEN
 
 
-def test_reject_msg_is_truncated_and_printable() -> None:
+async def test_reject_msg_is_truncated_and_printable() -> None:
     client = _spot(
         lambda _r: httpx.Response(200, json={"code": -1121, "msg": "bad\n" + "x" * 500})
     )
     with pytest.raises(ExchangeRejectError) as info:
-        client.submit(_intent())
+        await client.submit(_intent())
     assert info.value.msg is not None
     assert "\n" not in info.value.msg
     assert len(info.value.msg) <= 200
@@ -262,15 +262,15 @@ def test_unknown_status_maps_to_unknown_and_logs(caplog: pytest.LogCaptureFixtur
     assert any("unknown_exchange_order_status" in r.getMessage() for r in caplog.records)
 
 
-def test_submit_with_unknown_status_returns_unknown() -> None:
+async def test_submit_with_unknown_status_returns_unknown() -> None:
     client = _spot(lambda _r: httpx.Response(200, json=_ack(status="WEIRD")))
-    assert client.submit(_intent()).status == OrderStatus.UNKNOWN
+    assert (await client.submit(_intent())).status == OrderStatus.UNKNOWN
 
 
 # ------------------------------------------------- cancel / query param names
 
 
-def test_cancel_uses_client_order_id_and_get_uses_orig_client_order_id() -> None:
+async def test_cancel_uses_client_order_id_and_get_uses_orig_client_order_id() -> None:
     seen: list[tuple[str, dict[str, list[str]]]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -282,9 +282,9 @@ def test_cancel_uses_client_order_id_and_get_uses_orig_client_order_id() -> None
         return httpx.Response(200, json=_ack(clientOrderId="c-q", status="CANCELED"))
 
     client = _spot(handler)
-    client.submit(_intent(client_order_id="c-q"))
-    assert client.cancel("c-q").status == OrderStatus.CANCELED
-    got = client.get_order("c-q")
+    await client.submit(_intent(client_order_id="c-q"))
+    assert (await client.cancel("c-q")).status == OrderStatus.CANCELED
+    got = await client.get_order("c-q")
     assert got is not None and got.status == OrderStatus.CANCELED
     delete_q = next(q for m, q in seen if m == "DELETE")
     get_q = next(q for m, q in seen if m == "GET")
@@ -293,23 +293,23 @@ def test_cancel_uses_client_order_id_and_get_uses_orig_client_order_id() -> None
 
 
 @pytest.mark.parametrize("http_status", [200, 400])
-def test_get_order_no_such_order_returns_none(http_status: int) -> None:
+async def test_get_order_no_such_order_returns_none(http_status: int) -> None:
     client = _spot(
         lambda _r: httpx.Response(http_status, json={"code": -2013, "msg": "Order does not exist."})
     )
-    assert client.get_order("c-x") is None
+    assert await client.get_order("c-x") is None
 
 
-def test_get_order_other_error_code_raises() -> None:
+async def test_get_order_other_error_code_raises() -> None:
     client = _spot(lambda _r: httpx.Response(200, json={"code": -1022, "msg": "sig"}))
     with pytest.raises(ExchangeError):
-        client.get_order("c-x")
+        await client.get_order("c-x")
 
 
-def test_cancel_error_code_is_typed_reject() -> None:
+async def test_cancel_error_code_is_typed_reject() -> None:
     client = _spot(lambda _r: httpx.Response(200, json={"code": -2011, "msg": "CANCEL_REJECTED"}))
     with pytest.raises(ExchangeRejectError) as info:
-        client.cancel("c-x")
+        await client.cancel("c-x")
     assert info.value.code == -2011
 
 
@@ -389,7 +389,7 @@ def test_symbol_filters_from_metadata() -> None:
     )
 
 
-def test_submit_with_filters_sends_rounded_values() -> None:
+async def test_submit_with_filters_sends_rounded_values() -> None:
     seen: dict[str, list[str]] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -397,12 +397,12 @@ def test_submit_with_filters_sends_rounded_values() -> None:
         return httpx.Response(200, json=_ack())
 
     client = _spot(handler)
-    client.submit(_intent(quantity="0.12345", price="100.019"), filters=_filters())
+    await client.submit(_intent(quantity="0.12345", price="100.019"), filters=_filters())
     assert seen["quantity"] == ["0.123"]
     assert seen["price"] == ["100.01"]
 
 
-def test_precision_reject_makes_no_http_call() -> None:
+async def test_precision_reject_makes_no_http_call() -> None:
     calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -411,14 +411,14 @@ def test_precision_reject_makes_no_http_call() -> None:
 
     client = _spot(handler)
     with pytest.raises(OrderPrecisionError):
-        client.submit(_intent(quantity="0.0001"), filters=_filters())
+        await client.submit(_intent(quantity="0.0001"), filters=_filters())
     assert calls == []
 
 
 # ------------------------------------------------- orderTest mode
 
 
-def test_order_test_mode_never_calls_order_endpoint() -> None:
+async def test_order_test_mode_never_calls_order_endpoint() -> None:
     paths: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -426,25 +426,25 @@ def test_order_test_mode_never_calls_order_endpoint() -> None:
         return httpx.Response(200, json={})
 
     client = _spot(handler, use_order_test=True)
-    order = client.submit(_intent())
+    order = await client.submit(_intent())
     assert paths == [SPOT_ORDER_TEST_PATH]
     assert order.status == OrderStatus.TEST_ACCEPTED
     assert order.filled_quantity == 0
 
 
-def test_order_test_mode_reject_raises_typed() -> None:
+async def test_order_test_mode_reject_raises_typed() -> None:
     client = _spot(
         lambda _r: httpx.Response(200, json={"code": -1137, "msg": "precision"}),
         use_order_test=True,
     )
     with pytest.raises(ExchangeRejectError) as info:
-        client.submit(_intent())
+        await client.submit(_intent())
     assert info.value.code == -1137
 
 
-def test_test_order_returns_code_and_msg() -> None:
+async def test_test_order_returns_code_and_msg() -> None:
     client = _spot(lambda _r: httpx.Response(400, json={"code": -1121, "msg": "Invalid symbol."}))
-    result = client.test_order(_intent())
+    result = await client.test_order(_intent())
     assert result.accepted is False
     assert (result.http_status, result.code, result.msg) == (400, -1121, "Invalid symbol.")
 
@@ -463,19 +463,19 @@ def _settings(**kwargs: object) -> Settings:
     return Settings(**base)  # type: ignore[arg-type]
 
 
-def test_factory_use_order_test_spot_only_and_test_path() -> None:
+async def test_factory_use_order_test_spot_only_and_test_path() -> None:
     paths: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         paths.append(request.url.path)
         return httpx.Response(200, json={})
 
-    http = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.toobit.com")
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.toobit.com")
     port = build_execution_port(_settings(), client=http, use_order_test=True)
     assert isinstance(port, ToobitExecutionRouter)
-    assert port.submit(_intent()).status == OrderStatus.TEST_ACCEPTED
+    assert (await port.submit(_intent())).status == OrderStatus.TEST_ACCEPTED
     with pytest.raises(ExchangeRejectError):
-        port.submit(_intent(market_type=MarketType.FUTURES, symbol="BTC-SWAP-USDT"))
+        await port.submit(_intent(market_type=MarketType.FUTURES, symbol="BTC-SWAP-USDT"))
     assert paths == [SPOT_ORDER_TEST_PATH]
 
 
@@ -519,7 +519,7 @@ class ScriptedPort:
         self.submit_calls = 0
         self.get_calls = 0
 
-    def submit(self, intent: OrderIntent) -> Order:
+    async def submit(self, intent: OrderIntent) -> Order:
         self.submit_calls += 1
         if self.submit_exc is not None:
             raise self.submit_exc
@@ -538,10 +538,10 @@ class ScriptedPort:
             updated_at=NOW,
         )
 
-    def cancel(self, client_order_id: str) -> Order:
+    async def cancel(self, client_order_id: str) -> Order:
         raise NotImplementedError
 
-    def get_order(self, client_order_id: str) -> Order | None:
+    async def get_order(self, client_order_id: str) -> Order | None:
         self.get_calls += 1
         if self.get_exc is not None:
             raise self.get_exc
@@ -558,22 +558,22 @@ class ScriptedPort:
         ExchangeRejectError("futures disabled (local)"),
     ],
 )
-def test_manager_explicit_reject_is_rejected_and_does_not_block(exc: Exception) -> None:
+async def test_manager_explicit_reject_is_rejected_and_does_not_block(exc: Exception) -> None:
     port = ScriptedPort()
     port.submit_exc = exc
     mgr = OrderManager(_settings(), port, reconciler=Reconciler(port))
     decision, intent = _paired()
-    order = mgr.submit(decision, intent, now=NOW)
+    order = await mgr.submit(decision, intent, now=NOW)
     assert order.status == OrderStatus.REJECTED
     assert mgr.block_new_submits is False
     assert port.get_calls == 0  # no reconcile needed for a definitive reject
     # Same client_order_id is never resubmitted.
-    assert mgr.submit(decision, intent, now=NOW).status == OrderStatus.REJECTED
+    assert (await mgr.submit(decision, intent, now=NOW)).status == OrderStatus.REJECTED
     assert port.submit_calls == 1
     # A new, separately approved intent may proceed.
     port.submit_exc = None
     d2, i2 = _paired()
-    assert mgr.submit(d2, i2, now=NOW).status == OrderStatus.OPEN
+    assert (await mgr.submit(d2, i2, now=NOW)).status == OrderStatus.OPEN
     assert port.submit_calls == 2
 
 
@@ -589,14 +589,14 @@ def test_manager_explicit_reject_is_rejected_and_does_not_block(exc: Exception) 
         ExchangeRejectError("exec unknown", http_status=200, code=-1007),
     ],
 )
-def test_manager_non_definitive_reject_is_unknown_blocks_and_reconciles(
+async def test_manager_non_definitive_reject_is_unknown_blocks_and_reconciles(
     exc: Exception,
 ) -> None:
     port = ScriptedPort()
     port.submit_exc = exc
     mgr = OrderManager(_settings(), port, reconciler=Reconciler(port))
     decision, intent = _paired()
-    order = mgr.submit(decision, intent, now=NOW)
+    order = await mgr.submit(decision, intent, now=NOW)
     # get_result None => reconcile marks MISSING; never REJECTED, flow stays blocked.
     assert order.status in {OrderStatus.UNKNOWN, OrderStatus.MISSING}
     assert mgr.block_new_submits is True
@@ -604,7 +604,7 @@ def test_manager_non_definitive_reject_is_unknown_blocks_and_reconciles(
     assert port.submit_calls == 1
     d2, i2 = _paired()
     with pytest.raises(OrderSubmitBlocked):
-        mgr.submit(d2, i2, now=NOW)
+        await mgr.submit(d2, i2, now=NOW)
     assert port.submit_calls == 1
 
 
@@ -630,21 +630,21 @@ def _spot_router_handler(
         httpx.Response(200, json={"code": "not-an-int", "msg": "x"}),
     ],
 )
-def test_manager_spot_ambiguous_http_is_unknown_and_reconciles(
+async def test_manager_spot_ambiguous_http_is_unknown_and_reconciles(
     submit_response: httpx.Response,
 ) -> None:
     calls: list[tuple[str, str]] = []
     client = _spot(_spot_router_handler(submit_response, calls))
     mgr = OrderManager(_settings(), client, reconciler=Reconciler(client))
     decision, intent = _paired()
-    order = mgr.submit(decision, intent, now=NOW)
+    order = await mgr.submit(decision, intent, now=NOW)
     assert order.status != OrderStatus.REJECTED
     assert order.status in {OrderStatus.UNKNOWN, OrderStatus.MISSING}
     assert mgr.block_new_submits is True
     assert [m for m, _ in calls] == ["POST", "GET"]  # one submit, then get_order
 
 
-def test_manager_spot_parseable_reject_is_rejected_not_blocked() -> None:
+async def test_manager_spot_parseable_reject_is_rejected_not_blocked() -> None:
     calls: list[tuple[str, str]] = []
     client = _spot(
         _spot_router_handler(
@@ -653,51 +653,51 @@ def test_manager_spot_parseable_reject_is_rejected_not_blocked() -> None:
     )
     mgr = OrderManager(_settings(), client, reconciler=Reconciler(client))
     decision, intent = _paired()
-    order = mgr.submit(decision, intent, now=NOW)
+    order = await mgr.submit(decision, intent, now=NOW)
     assert order.status == OrderStatus.REJECTED
     assert mgr.block_new_submits is False
     assert [m for m, _ in calls] == ["POST"]  # no reconcile for a definitive reject
 
 
-def test_order_test_mode_429_is_definitive_order_test_reject() -> None:
+async def test_order_test_mode_429_is_definitive_order_test_reject() -> None:
     client = _spot(lambda _r: httpx.Response(429, json={"msg": "r"}), use_order_test=True)
     with pytest.raises(OrderTestRejectError) as info:
-        client.submit(_intent())
+        await client.submit(_intent())
     assert info.value.http_status == 429
 
 
-def test_manager_cancel_unknown_ack_blocks_new_submits() -> None:
+async def test_manager_cancel_unknown_ack_blocks_new_submits() -> None:
     port = ScriptedPort()
     mgr = OrderManager(_settings(), port)
     decision, intent = _paired()
-    placed = mgr.submit(decision, intent, now=NOW)
+    placed = await mgr.submit(decision, intent, now=NOW)
     assert placed.status == OrderStatus.OPEN
     assert mgr.block_new_submits is False
 
-    def cancel(client_order_id: str) -> Order:
+    async def cancel(client_order_id: str) -> Order:
         return placed.model_copy(update={"status": OrderStatus.UNKNOWN})
 
     port.cancel = cancel  # type: ignore[method-assign]
-    mgr.cancel(intent.client_order_id, now=NOW)
+    await mgr.cancel(intent.client_order_id, now=NOW)
     assert mgr.critical_unknown is True
     assert mgr.block_new_submits is True
     d2, i2 = _paired()
     with pytest.raises(OrderSubmitBlocked):
-        mgr.submit(d2, i2, now=NOW)
+        await mgr.submit(d2, i2, now=NOW)
     assert port.submit_calls == 1
 
 
-def test_manager_cancel_clean_ack_keeps_flow_open() -> None:
+async def test_manager_cancel_clean_ack_keeps_flow_open() -> None:
     port = ScriptedPort()
     mgr = OrderManager(_settings(), port)
     decision, intent = _paired()
-    placed = mgr.submit(decision, intent, now=NOW)
+    placed = await mgr.submit(decision, intent, now=NOW)
 
-    def cancel(client_order_id: str) -> Order:
+    async def cancel(client_order_id: str) -> Order:
         return placed.model_copy(update={"status": OrderStatus.CANCELED})
 
     port.cancel = cancel  # type: ignore[method-assign]
-    mgr.cancel(intent.client_order_id, now=NOW)
+    await mgr.cancel(intent.client_order_id, now=NOW)
     assert mgr.block_new_submits is False
 
 
@@ -724,58 +724,58 @@ def test_persist_refuses_test_accepted() -> None:
     session.scalars.assert_not_called()
 
 
-def test_manager_ambiguous_still_unknown_and_blocks() -> None:
+async def test_manager_ambiguous_still_unknown_and_blocks() -> None:
     port = ScriptedPort()
     port.submit_exc = AmbiguousSubmitError("timeout", client_order_id="x")
     port.get_exc = ExchangeError("query failed")
     mgr = OrderManager(_settings(), port, reconciler=Reconciler(port))
     decision, intent = _paired()
-    order = mgr.submit(decision, intent, now=NOW)  # reconcile raising must not propagate
+    order = await mgr.submit(decision, intent, now=NOW)  # reconcile raising must not propagate
     assert order.status == OrderStatus.UNKNOWN
     assert mgr.block_new_submits is True
     assert port.get_calls == 1
     assert port.submit_calls == 1
 
 
-def test_manager_generic_error_reconcile_raises_stays_unknown() -> None:
+async def test_manager_generic_error_reconcile_raises_stays_unknown() -> None:
     port = ScriptedPort()
     port.submit_exc = RuntimeError("boom")
     port.get_exc = RuntimeError("reconcile down")
     mgr = OrderManager(_settings(), port, reconciler=Reconciler(port))
     decision, intent = _paired()
-    assert mgr.submit(decision, intent, now=NOW).status == OrderStatus.UNKNOWN
+    assert (await mgr.submit(decision, intent, now=NOW)).status == OrderStatus.UNKNOWN
     assert mgr.critical_unknown is True
 
 
-def test_manager_ack_with_unknown_status_blocks_and_reconciles() -> None:
+async def test_manager_ack_with_unknown_status_blocks_and_reconciles() -> None:
     port = ScriptedPort()
     port.submit_status = OrderStatus.UNKNOWN
     mgr = OrderManager(_settings(), port, reconciler=Reconciler(port))
     decision, intent = _paired()
-    order = mgr.submit(decision, intent, now=NOW)
+    order = await mgr.submit(decision, intent, now=NOW)
     assert port.get_calls == 1
     # get_result None ⇒ MISSING; flow stays blocked either way.
     assert order.status in {OrderStatus.UNKNOWN, OrderStatus.MISSING}
     assert mgr.block_new_submits is True
 
 
-def test_manager_reject_decision_never_reaches_port() -> None:
+async def test_manager_reject_decision_never_reaches_port() -> None:
     port = ScriptedPort()
     mgr = OrderManager(_settings(), port)
     pid = uuid4()
     with pytest.raises(RiskHandoffDenied):
-        mgr.submit(_decision(pid, RiskDecisionType.REJECT), _intent(proposal_id=pid), now=NOW)
+        await mgr.submit(_decision(pid, RiskDecisionType.REJECT), _intent(proposal_id=pid), now=NOW)
     assert port.submit_calls == 0
 
 
-def test_manager_test_accepted_is_terminal_and_not_blocking() -> None:
+async def test_manager_test_accepted_is_terminal_and_not_blocking() -> None:
     port = ScriptedPort()
     port.submit_status = OrderStatus.TEST_ACCEPTED
     mgr = OrderManager(_settings(), port)
     decision, intent = _paired()
-    assert mgr.submit(decision, intent, now=NOW).status == OrderStatus.TEST_ACCEPTED
+    assert (await mgr.submit(decision, intent, now=NOW)).status == OrderStatus.TEST_ACCEPTED
     assert mgr.block_new_submits is False
-    assert mgr.submit(decision, intent, now=NOW).status == OrderStatus.TEST_ACCEPTED
+    assert (await mgr.submit(decision, intent, now=NOW)).status == OrderStatus.TEST_ACCEPTED
     assert port.submit_calls == 1
 
 
@@ -799,7 +799,7 @@ def test_script_refuses_without_confirmation(
     def _no_network(*_a: Any, **_k: Any) -> None:
         raise AssertionError("network client must not be built")
 
-    monkeypatch.setattr(script.httpx, "Client", _no_network)
+    monkeypatch.setattr(script.httpx, "AsyncClient", _no_network)
     rc = script.main(["--symbol", "ETHUSDT", "--price", "100", "--quantity", "1"])
     assert rc == 2
     assert "refused" in capsys.readouterr().out
@@ -819,21 +819,33 @@ def test_script_request_hook_only_allows_order_test() -> None:
             script._assert_order_test_only(httpx.Request(method, f"https://api.toobit.com{path}"))
 
 
+async def test_script_async_hook_refuses_order_endpoint() -> None:
+    script = _load_script()
+    await script._order_test_hook(
+        httpx.Request("POST", f"https://api.toobit.com{SPOT_ORDER_TEST_PATH}")
+    )
+    with pytest.raises(script.ForbiddenPathError):
+        await script._order_test_hook(
+            httpx.Request("POST", "https://api.toobit.com/api/v1/spot/order")
+        )
+
+
 def test_script_sends_only_order_test_and_prints_no_secret(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     script = _load_script()
     paths: list[str] = []
-    real_client = httpx.Client
+    real_client = httpx.AsyncClient
 
     def handler(request: httpx.Request) -> httpx.Response:
         paths.append(request.url.path)
         return httpx.Response(200, json={})
 
-    def fake_client(**kwargs: Any) -> httpx.Client:
+    def fake_client(**kwargs: Any) -> httpx.AsyncClient:
+        assert kwargs["event_hooks"]["request"], "orderTest path hook must be installed"
         return real_client(transport=httpx.MockTransport(handler), **kwargs)
 
-    monkeypatch.setattr(script.httpx, "Client", fake_client)
+    monkeypatch.setattr(script.httpx, "AsyncClient", fake_client)
     monkeypatch.setattr(
         script,
         "Settings",

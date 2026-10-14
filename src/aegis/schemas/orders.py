@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from aegis.schemas.common import ApiModel, LedgerKind, MarketType
 from aegis.schemas.market import InstrumentRef
@@ -31,6 +31,31 @@ class OrderStatus(StrEnum):
     TEST_ACCEPTED = "test_accepted"
 
 
+class OrderSide(StrEnum):
+    """Order side. Serialized values stay ``"BUY"`` / ``"SELL"``."""
+
+    BUY = "BUY"
+    SELL = "SELL"
+
+    @classmethod
+    def parse(cls, value: object) -> OrderSide:
+        """Normalize ``value`` (case / surrounding whitespace) or raise ``ValueError``.
+
+        Only ``BUY`` and ``SELL`` are accepted; direction words such as ``LONG`` or
+        ``BUY_OPEN`` are refused at the schema boundary (Futures position side is
+        carried in ``OrderIntent.extras``).
+        """
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, str):
+            raise ValueError(f"order side must be a string, got {type(value).__name__}")
+        normalized = value.strip().upper()
+        try:
+            return cls(normalized)
+        except ValueError as exc:
+            raise ValueError(f"unsupported order side {value!r}; expected BUY or SELL") from exc
+
+
 class OrderIntent(ApiModel):
     intent_id: UUID
     proposal_id: UUID
@@ -38,13 +63,18 @@ class OrderIntent(ApiModel):
     client_order_id: str
     ledger_kind: LedgerKind
     instrument: InstrumentRef
-    side: str
+    side: OrderSide
     order_type: str
     quantity: Decimal
     price: Decimal | None = None
     time_in_force: str | None = None
     extras: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
+
+    @field_validator("side", mode="before")
+    @classmethod
+    def _normalize_side(cls, value: object) -> OrderSide:
+        return OrderSide.parse(value)
 
 
 class Order(ApiModel):
@@ -55,13 +85,18 @@ class Order(ApiModel):
     ledger_kind: LedgerKind
     instrument: InstrumentRef
     status: OrderStatus
-    side: str
+    side: OrderSide
     order_type: str
     quantity: Decimal
     filled_quantity: Decimal = Decimal("0")
     price: Decimal | None = None
     created_at: datetime
     updated_at: datetime
+
+    @field_validator("side", mode="before")
+    @classmethod
+    def _normalize_side(cls, value: object) -> OrderSide:
+        return OrderSide.parse(value)
 
 
 class Fill(ApiModel):

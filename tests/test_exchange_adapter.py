@@ -97,7 +97,7 @@ def test_sign_v2_json_concatenates_query_and_body() -> None:
     assert sig == expected
 
 
-def test_spot_submit_mock_200() -> None:
+async def test_spot_submit_mock_200() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers.get("X-BB-APIKEY") == API_KEY
         assert "signature=" in str(request.url)
@@ -119,19 +119,19 @@ def test_spot_submit_mock_200() -> None:
         )
 
     transport = httpx.MockTransport(handler)
-    http = httpx.Client(transport=transport, base_url="https://api.toobit.com")
+    http = httpx.AsyncClient(transport=transport, base_url="https://api.toobit.com")
     client = ToobitSpotExecutionClient(
         api_key=API_KEY, api_secret=SECRET, client=http
     )
-    order = client.submit(_intent())
+    order = await client.submit(_intent())
     assert order.status == OrderStatus.OPEN
     assert order.exchange_order_id == "99"
     assert order.ledger_kind == LedgerKind.LIVE
 
 
-def test_futures_requires_client_order_id() -> None:
+async def test_futures_requires_client_order_id() -> None:
     transport = httpx.MockTransport(lambda r: httpx.Response(200, json={"code": 200, "data": {}}))
-    http = httpx.Client(transport=transport, base_url="https://api.toobit.com")
+    http = httpx.AsyncClient(transport=transport, base_url="https://api.toobit.com")
     client = ToobitFuturesExecutionClient(
         api_key=API_KEY, api_secret=SECRET, client=http
     )
@@ -139,13 +139,13 @@ def test_futures_requires_client_order_id() -> None:
         market_type=MarketType.FUTURES,
         symbol="BTC-SWAP-USDT",
         client_order_id="   ",
-        side="LONG",
+        side="BUY",
     )
     with pytest.raises(Exception, match="newClientOrderId|client"):
-        client.submit(intent)
+        await client.submit(intent)
 
 
-def test_futures_submit_sends_new_client_order_id() -> None:
+async def test_futures_submit_sends_new_client_order_id() -> None:
     seen: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -169,50 +169,50 @@ def test_futures_submit_sends_new_client_order_id() -> None:
         )
 
     transport = httpx.MockTransport(handler)
-    http = httpx.Client(transport=transport, base_url="https://api.toobit.com")
+    http = httpx.AsyncClient(transport=transport, base_url="https://api.toobit.com")
     client = ToobitFuturesExecutionClient(
         api_key=API_KEY, api_secret=SECRET, client=http
     )
-    order = client.submit(
+    order = await client.submit(
         _intent(
             market_type=MarketType.FUTURES,
             symbol="BTC-SWAP-USDT",
             client_order_id="fut-1",
-            side="LONG",
+            side="BUY",
         )
     )
     assert "newClientOrderId" in str(seen["body"])
     assert order.status == OrderStatus.OPEN
 
 
-def test_timeout_raises_ambiguous() -> None:
+async def test_timeout_raises_ambiguous() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("timed out")
 
     transport = httpx.MockTransport(handler)
-    http = httpx.Client(transport=transport, base_url="https://api.toobit.com")
+    http = httpx.AsyncClient(transport=transport, base_url="https://api.toobit.com")
     client = ToobitSpotExecutionClient(
         api_key=API_KEY, api_secret=SECRET, client=http
     )
     with pytest.raises(AmbiguousSubmitError) as exc:
-        client.submit(_intent())
+        await client.submit(_intent())
     assert exc.value.client_order_id == "c-spot-1"
 
 
-def test_http_5xx_raises_ambiguous() -> None:
+async def test_http_5xx_raises_ambiguous() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(503, json={"msg": "unavailable"})
 
     transport = httpx.MockTransport(handler)
-    http = httpx.Client(transport=transport, base_url="https://api.toobit.com")
+    http = httpx.AsyncClient(transport=transport, base_url="https://api.toobit.com")
     client = ToobitSpotExecutionClient(
         api_key=API_KEY, api_secret=SECRET, client=http
     )
     with pytest.raises(AmbiguousSubmitError):
-        client.submit(_intent())
+        await client.submit(_intent())
 
 
-def test_http_429_rate_limit_header() -> None:
+async def test_http_429_rate_limit_header() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             429,
@@ -221,13 +221,13 @@ def test_http_429_rate_limit_header() -> None:
         )
 
     transport = httpx.MockTransport(handler)
-    http = httpx.Client(transport=transport, base_url="https://api.toobit.com")
+    http = httpx.AsyncClient(transport=transport, base_url="https://api.toobit.com")
     client = ToobitSpotExecutionClient(
         api_key=API_KEY, api_secret=SECRET, client=http
     )
     # 429 on submit is ambiguous (status unknown → reconcile), not a reject.
     with pytest.raises(RateLimitedSubmitError) as exc:
-        client.submit(_intent())
+        await client.submit(_intent())
     assert isinstance(exc.value, AmbiguousSubmitError)
     assert exc.value.reset_timestamp_ms == 1_700_000_005_000
 

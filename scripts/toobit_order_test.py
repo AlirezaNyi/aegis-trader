@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -38,11 +39,12 @@ from aegis.exchange.errors import ExchangeError  # noqa: E402
 from aegis.exchange.paths import REST_BASE_URL, VERIFIED_SUBMIT_PATHS  # noqa: E402
 from aegis.exchange.spot_client import (  # noqa: E402
     SPOT_ORDER_TEST_PATH,
+    OrderTestResult,  # noqa: E402
     ToobitSpotExecutionClient,
 )
 from aegis.schemas.common import LedgerKind, MarketType  # noqa: E402
 from aegis.schemas.market import InstrumentRef  # noqa: E402
-from aegis.schemas.orders import OrderIntent  # noqa: E402
+from aegis.schemas.orders import OrderIntent, OrderSide  # noqa: E402
 
 
 class ForbiddenPathError(RuntimeError):
@@ -81,6 +83,31 @@ def _assert_order_test_only(request: httpx.Request) -> None:
         )
 
 
+async def _order_test_hook(request: httpx.Request) -> None:
+    """Async event hook wrapper (httpx.AsyncClient requires awaitable hooks)."""
+    _assert_order_test_only(request)
+
+
+async def _send_order_test(settings: Settings, intent: OrderIntent) -> OrderTestResult:
+    http = httpx.AsyncClient(
+        base_url=REST_BASE_URL,
+        timeout=settings.exchange_timeout_seconds,
+        event_hooks={"request": [_order_test_hook]},
+    )
+    try:
+        client = ToobitSpotExecutionClient(
+            api_key=settings.toobit_api_key,
+            api_secret=settings.toobit_api_secret,
+            client=http,
+            recv_window_ms=settings.exchange_recv_window_ms,
+            use_order_test=True,
+        )
+        # test_order only: never submit(), never /api/v1/spot/order.
+        return await client.test_order(intent)
+    finally:
+        await http.aclose()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     if not args.confirmed:
@@ -103,33 +130,18 @@ def main(argv: list[str] | None = None) -> int:
         client_order_id=f"aegis-ot-{uuid4().hex[:16]}",
         ledger_kind=LedgerKind.LIVE,
         instrument=InstrumentRef(market_type=MarketType.SPOT, symbol=args.symbol),
-        side="BUY",
+        side=OrderSide.BUY,
         order_type="LIMIT",
         quantity=args.quantity,
         price=args.price,
         created_at=datetime.now(tz=UTC),
     )
 
-    http = httpx.Client(
-        base_url=REST_BASE_URL,
-        timeout=settings.exchange_timeout_seconds,
-        event_hooks={"request": [_assert_order_test_only]},
-    )
     try:
-        client = ToobitSpotExecutionClient(
-            api_key=settings.toobit_api_key,
-            api_secret=settings.toobit_api_secret,
-            client=http,
-            recv_window_ms=settings.exchange_recv_window_ms,
-            use_order_test=True,
-        )
-        # test_order only: never submit(), never /api/v1/spot/order.
-        result = client.test_order(intent)
+        result = asyncio.run(_send_order_test(settings, intent))
     except (ExchangeError, ForbiddenPathError, httpx.HTTPError) as exc:
         print(f"error={type(exc).__name__}")
         return 1
-    finally:
-        http.close()
 
     print(f"http_status={result.http_status}")
     print(f"code={result.code}")

@@ -16,7 +16,7 @@ from aegis.interfaces.execution import ExecutionPort, NullExecutionPort
 def build_execution_port(
     settings: Settings,
     *,
-    client: httpx.Client | None = None,
+    client: httpx.AsyncClient | None = None,
     use_order_test: bool = False,
 ) -> ExecutionPort:
     """Return live router only when live_execution_permitted and credentials exist.

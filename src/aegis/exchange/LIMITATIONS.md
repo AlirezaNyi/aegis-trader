@@ -51,6 +51,25 @@
   `X-Api-Limit-Reset-Timestamp` when present
 * Withdraw `POST /api/v1/account/withdraw` is denied via `assert_withdraw_forbidden`
 * `LIVE_SUBMIT_SUPPORTED = True` (code path exists); factory returns `NullExecutionPort` unless live gates + credentials
+* Async I/O: Spot / Futures clients, router and the signed helpers in `_http.py` use
+  `httpx.AsyncClient` (`await submit / cancel / get_order / test_order`). An injected
+  `AsyncClient` (e.g. `httpx.MockTransport` in tests) is owned by the caller and not
+  closed by `aclose()`; clients/router support `async with`. Classification,
+  path allowlist, withdraw deny and precision guard are unchanged by the conversion.
+  `scripts/toobit_order_test.py` uses an async request hook (`_order_test_hook`).
+* Sides: `OrderIntent.side` / `Order.side` are `schemas.orders.OrderSide`
+  (`BUY`/`SELL`, normalized case/whitespace, anything else rejected at the schema
+  boundary). Futures direction words (`LONG`, `BUY_OPEN`, ...) are no longer accepted
+  as intent sides; close/hedge position sides go in `extras["position_side"]`. An
+  exchange-reported side that is not exactly BUY/SELL (Futures spellings unverified)
+  keeps the side we sent.
+* Futures order `side` always comes from the Risk-approved `intent.side`; `extras`
+  can never change it. `extras["side"]` equal to `intent.side` is ignored; a
+  differing (or non-string) value raises `side_map.OrderSideMappingError` (an
+  `ExchangeRejectError` with no http/code ⇒ definitive local reject, REJECTED, no
+  block) before any request is built. `extras["position_side"]` /
+  `extras["positionSide"]` must be a verified value (`LONG`/`SHORT`) and must agree
+  when both are present; otherwise the same typed reject.
 
 ## Unverified / out of scope
 

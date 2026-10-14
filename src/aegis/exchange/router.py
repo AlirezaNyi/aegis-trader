@@ -25,44 +25,46 @@ class ToobitExecutionRouter:
         self._spot = spot
         self._futures = futures
 
-    def submit(self, intent: OrderIntent) -> Order:
-        return self._client_for(intent.instrument.market_type).submit(intent)
+    async def submit(self, intent: OrderIntent) -> Order:
+        return await self._client_for(intent.instrument.market_type).submit(intent)
 
-    def cancel(self, client_order_id: str) -> Order:
+    async def cancel(self, client_order_id: str) -> Order:
         # Prefer whichever client knows the intent; Spot first then Futures.
-        if client_order_id in self._spot._intents or client_order_id in self._spot._orders:
-            return self._spot.cancel(client_order_id)
-        if self._futures is not None and (
-            client_order_id in self._futures._intents
-            or client_order_id in self._futures._orders
-        ):
-            return self._futures.cancel(client_order_id)
+        if self._spot.knows(client_order_id):
+            return await self._spot.cancel(client_order_id)
+        if self._futures is not None and self._futures.knows(client_order_id):
+            return await self._futures.cancel(client_order_id)
         raise ExchangeError(
             f"router cancel: unknown client_order_id={client_order_id!r}"
         )
 
-    def get_order(self, client_order_id: str) -> Order | None:
-        if client_order_id in self._spot._intents or client_order_id in self._spot._orders:
-            return self._spot.get_order(client_order_id)
-        if self._futures is not None and (
-            client_order_id in self._futures._intents
-            or client_order_id in self._futures._orders
-        ):
-            return self._futures.get_order(client_order_id)
+    async def get_order(self, client_order_id: str) -> Order | None:
+        if self._spot.knows(client_order_id):
+            return await self._spot.get_order(client_order_id)
+        if self._futures is not None and self._futures.knows(client_order_id):
+            return await self._futures.get_order(client_order_id)
         # Ambiguous restart: try spot then futures
-        order = self._spot.get_order(client_order_id)
+        order = await self._spot.get_order(client_order_id)
         if order is not None or self._futures is None:
             return order
-        return self._futures.get_order(client_order_id)
+        return await self._futures.get_order(client_order_id)
 
     def remember_intent(self, intent: OrderIntent) -> None:
         client = self._client_for(intent.instrument.market_type)
         client.remember_intent(intent)
 
-    def close(self) -> None:
-        self._spot.close()
-        if self._futures is not None:
-            self._futures.close()
+    async def aclose(self) -> None:
+        try:
+            await self._spot.aclose()
+        finally:
+            if self._futures is not None:
+                await self._futures.aclose()
+
+    async def __aenter__(self) -> ToobitExecutionRouter:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        await self.aclose()
 
     def _client_for(
         self, market_type: MarketType

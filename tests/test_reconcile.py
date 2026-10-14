@@ -68,7 +68,7 @@ class MockAdapter:
     def remember_intent(self, intent: OrderIntent) -> None:
         self._intents[intent.client_order_id] = intent
 
-    def submit(self, intent: OrderIntent) -> Order:
+    async def submit(self, intent: OrderIntent) -> Order:
         self.submit_calls += 1
         if self.raise_ambiguous:
             raise AmbiguousSubmitError("timeout", client_order_id=intent.client_order_id)
@@ -90,14 +90,14 @@ class MockAdapter:
             updated_at=now,
         )
 
-    def cancel(self, client_order_id: str) -> Order:
+    async def cancel(self, client_order_id: str) -> Order:
         raise NotImplementedError
 
-    def get_order(self, client_order_id: str) -> Order | None:
+    async def get_order(self, client_order_id: str) -> Order | None:
         return self.get_map.get(client_order_id)
 
 
-def test_reconcile_after_ambiguous_finds_open() -> None:
+async def test_reconcile_after_ambiguous_finds_open() -> None:
     adapter = MockAdapter()
     adapter.raise_ambiguous = True
     reconciler = Reconciler(adapter)
@@ -120,12 +120,12 @@ def test_reconcile_after_ambiguous_finds_open() -> None:
         created_at=now,
         updated_at=now,
     )
-    order = mgr.submit(_approve(intent), intent, now=now)
+    order = await mgr.submit(_approve(intent), intent, now=now)
     assert order.status == OrderStatus.OPEN
     assert adapter.submit_calls == 1
 
 
-def test_reconcile_after_ambiguous_finds_filled() -> None:
+async def test_reconcile_after_ambiguous_finds_filled() -> None:
     adapter = MockAdapter()
     adapter.raise_ambiguous = True
     reconciler = Reconciler(adapter)
@@ -148,25 +148,25 @@ def test_reconcile_after_ambiguous_finds_filled() -> None:
         created_at=now,
         updated_at=now,
     )
-    order = mgr.submit(_approve(intent), intent, now=now)
+    order = await mgr.submit(_approve(intent), intent, now=now)
     assert order.status == OrderStatus.FILLED
 
 
-def test_reconcile_not_found_missing() -> None:
+async def test_reconcile_not_found_missing() -> None:
     adapter = MockAdapter()
     adapter.raise_ambiguous = True
     reconciler = Reconciler(adapter)
     mgr = OrderManager(_live_settings(), adapter, reconciler=reconciler)
     intent = _intent("c-missing")
     adapter.get_map["c-missing"] = None
-    order = mgr.submit(
+    order = await mgr.submit(
         _approve(intent), intent, now=datetime(2026, 10, 9, tzinfo=UTC)
     )
     assert order.status == OrderStatus.MISSING
     assert mgr.block_new_submits is True
 
 
-def test_restart_recovery() -> None:
+async def test_restart_recovery() -> None:
     adapter = MockAdapter()
     reconciler = Reconciler(adapter)
     mgr = OrderManager(_live_settings(), adapter, reconciler=reconciler)
@@ -199,7 +199,7 @@ def test_restart_recovery() -> None:
             "exchange_order_id": "1",
         }
     )
-    result = recover_open_intents(mgr, reconciler, now=now)
+    result = await recover_open_intents(mgr, reconciler, now=now)
     assert result.ok is True
     assert mgr.orders["c-restart"].status == OrderStatus.FILLED
     assert mgr.block_new_submits is False

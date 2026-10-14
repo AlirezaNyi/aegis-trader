@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 from aegis.reconcile.restart import RestartRecoveryResult, recover_open_intents
-from aegis.reconcile.service import Reconciler, ReconcileResult
+from aegis.reconcile.service import (
+    ReconcileBatchResult,
+    Reconciler,
+    ReconcileResult,
+    ReconcileSweeper,
+)
 
 PHASE = 7
 
 __all__ = [
     "PHASE",
+    "ReconcileBatchResult",
     "ReconcileResult",
+    "ReconcileSweeper",
     "Reconciler",
     "RestartRecoveryResult",
     "recover_open_intents",

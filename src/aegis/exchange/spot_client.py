@@ -51,7 +51,7 @@ class ToobitSpotExecutionClient:
         *,
         api_key: str,
         api_secret: str,
-        client: httpx.Client | None = None,
+        client: httpx.AsyncClient | None = None,
         base_url: str = REST_BASE_URL,
         recv_window_ms: int = 5000,
         timeout_seconds: float = 10.0,
@@ -64,16 +64,27 @@ class ToobitSpotExecutionClient:
         self._recv_window_ms = recv_window_ms
         self._use_order_test = use_order_test
         self._owns_client = client is None
-        self._client = client or httpx.Client(
+        self._client = client or httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             timeout=timeout_seconds,
         )
         self._intents: dict[str, OrderIntent] = {}
         self._orders: dict[str, Order] = {}
 
-    def close(self) -> None:
+    async def aclose(self) -> None:
+        """Close the owned AsyncClient. An injected client is owned by the caller."""
         if self._owns_client:
-            self._client.close()
+            await self._client.aclose()
+
+    async def __aenter__(self) -> ToobitSpotExecutionClient:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        await self.aclose()
+
+    def knows(self, client_order_id: str) -> bool:
+        """True when this client holds a local intent or order for the id."""
+        return client_order_id in self._intents or client_order_id in self._orders
 
     def remember_intent(self, intent: OrderIntent) -> None:
         """Allow reconcile after ambiguous submit before ack is stored locally."""
@@ -110,7 +121,7 @@ class ToobitSpotExecutionClient:
             params["timeInForce"] = intent.time_in_force
         return params
 
-    def submit(
+    async def submit(
         self,
         intent: OrderIntent,
         *,
@@ -133,7 +144,7 @@ class ToobitSpotExecutionClient:
         )
         if self._use_order_test:
             try:
-                result = self.test_order(intent)
+                result = await self.test_order(intent)
             except RateLimitError as exc:
                 # orderTest never reaches the matching engine: a 429 here is a
                 # definitive (non-blocking) refusal, not an ambiguous live submit.
@@ -160,7 +171,7 @@ class ToobitSpotExecutionClient:
 
         path = VERIFIED_SUBMIT_PATHS["spot_order"]
         self.remember_intent(intent)
-        response = signed_form_request(
+        response = await signed_form_request(
             self._client,
             method="POST",
             path=path,
@@ -177,7 +188,7 @@ class ToobitSpotExecutionClient:
         self._orders[intent.client_order_id] = order
         return order
 
-    def test_order(self, intent: OrderIntent) -> OrderTestResult:
+    async def test_order(self, intent: OrderIntent) -> OrderTestResult:
         """``POST /api/v1/spot/orderTest`` only. Never touches ``/api/v1/spot/order``.
 
         Returns the HTTP status and any exchange ``code``/``msg``; does not raise on
@@ -186,7 +197,7 @@ class ToobitSpotExecutionClient:
         path = VERIFIED_SUBMIT_PATHS["spot_order_test"]
         if path != SPOT_ORDER_TEST_PATH:
             raise ExchangeError(f"order test path mismatch: {path!r}")
-        response = signed_form_request(
+        response = await signed_form_request(
             self._client,
             method="POST",
             path=path,
@@ -207,9 +218,9 @@ class ToobitSpotExecutionClient:
             http_status=response.status_code, accepted=accepted, code=code, msg=msg
         )
 
-    def cancel(self, client_order_id: str) -> Order:
+    async def cancel(self, client_order_id: str) -> Order:
         path = VERIFIED_QUERY_PATHS["spot_cancel_order"]
-        response = signed_form_request(
+        response = await signed_form_request(
             self._client,
             method="DELETE",
             path=path,
@@ -243,9 +254,9 @@ class ToobitSpotExecutionClient:
             raise ExchangeError("spot cancel response must be an object")
         return self._apply_payload(client_order_id, payload)
 
-    def get_order(self, client_order_id: str) -> Order | None:
+    async def get_order(self, client_order_id: str) -> Order | None:
         path = VERIFIED_QUERY_PATHS["spot_get_order"]
-        response = signed_form_request(
+        response = await signed_form_request(
             self._client,
             method="GET",
             path=path,

@@ -2,20 +2,44 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from aegis.db.models import OrderRow
+from aegis.logging import get_logger
 from aegis.schemas.common import LedgerKind, MarketType
 from aegis.schemas.market import InstrumentRef
-from aegis.schemas.orders import Order, OrderStatus
+from aegis.schemas.orders import Order, OrderSide, OrderStatus
+
+logger = get_logger("aegis.orders.persist")
 
 
 class LiveLedgerKindError(RuntimeError):
     """Raised when a non-live order is offered to live persistence."""
+
+
+class LiveOrderLoadError(RuntimeError):
+    """One or more persisted live order rows could not be parsed (e.g. a legacy /
+    unparseable ``side``). Never silently dropped: pass this to
+    ``recover_open_intents(load_error=...)`` so new submits stay blocked.
+
+    ``loaded`` holds the rows that did parse; ``failed_client_order_ids`` the rest
+    (row id is used when the client_order_id itself is unavailable).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        loaded: dict[str, Order],
+        failed_client_order_ids: list[str],
+    ) -> None:
+        super().__init__(message)
+        self.loaded = loaded
+        self.failed_client_order_ids = failed_client_order_ids
 
 
 def _dec_str(value: Decimal | None) -> str | None:
@@ -59,7 +83,7 @@ def upsert_live_order(session: Session, order: Order) -> None:
     row.market_type = order.instrument.market_type.value
     row.symbol = order.instrument.symbol
     row.status = order.status.value
-    row.side = order.side
+    row.side = order.side.value
     row.order_type = order.order_type
     row.quantity = str(order.quantity)
     row.filled_quantity = str(order.filled_quantity)
@@ -69,13 +93,34 @@ def upsert_live_order(session: Session, order: Order) -> None:
 
 
 def load_live_orders(session: Session) -> dict[str, Order]:
+    """Load every live order row. Raises :class:`LiveOrderLoadError` (after logging
+    each bad row by id and error class only) if any row cannot be parsed."""
     rows = session.scalars(
         select(OrderRow).where(OrderRow.ledger_kind == LedgerKind.LIVE.value)
     ).all()
     out: dict[str, Order] = {}
+    failed: list[str] = []
     for row in rows:
-        order = _row_to_order(row)
+        try:
+            order = _row_to_order(row)
+        except (ValueError, TypeError, InvalidOperation) as exc:
+            ident = str(getattr(row, "client_order_id", None) or getattr(row, "id", "?"))
+            failed.append(ident)
+            logger.error(
+                "live_order_row_unparseable client_order_id=%s err=%s",
+                ident,
+                type(exc).__name__,
+                extra={"event": "live_order_row_unparseable", "component": "orders_persist"},
+            )
+            continue
         out[order.client_order_id] = order
+    if failed:
+        raise LiveOrderLoadError(
+            f"{len(failed)} persisted live order row(s) unparseable; "
+            "new live submits must stay blocked",
+            loaded=out,
+            failed_client_order_ids=failed,
+        )
     return out
 
 
@@ -94,7 +139,7 @@ def _row_to_order(row: OrderRow) -> Order:
             symbol=row.symbol,
         ),
         status=OrderStatus(row.status),
-        side=row.side,
+        side=OrderSide.parse(row.side),
         order_type=row.order_type,
         quantity=Decimal(row.quantity),
         filled_quantity=Decimal(row.filled_quantity or "0"),

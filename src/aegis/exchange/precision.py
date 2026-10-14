@@ -17,7 +17,7 @@ from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 
 from aegis.exchange.errors import OrderPrecisionError
 from aegis.schemas.metadata import SymbolMetadata
-from aegis.schemas.orders import OrderIntent
+from aegis.schemas.orders import OrderIntent, OrderSide
 
 
 @dataclass(frozen=True)
@@ -88,10 +88,11 @@ def apply_spot_precision(
         raise _reject(intent, "non-positive tickSize/stepSize")
 
     order_type = intent.order_type.strip().upper()
-    side = intent.side.strip().upper()
-    if side not in {"BUY", "SELL"}:
-        raise _reject(intent, f"unsupported spot side {intent.side!r}")
-    if order_type == "MARKET" and side == "BUY":
+    try:
+        side = OrderSide.parse(intent.side)
+    except ValueError:
+        raise _reject(intent, f"unsupported spot side {intent.side!r}") from None
+    if order_type == "MARKET" and side is OrderSide.BUY:
         raise _reject(intent, "MARKET BUY quote-amount precision is unverified")
     if order_type not in {"LIMIT", "LIMIT_MAKER", "MARKET"}:
         raise _reject(intent, f"unsupported order type {intent.order_type!r}")
@@ -111,7 +112,7 @@ def apply_spot_precision(
             raise _reject(intent, "LIMIT order requires a positive price")
         price = (
             round_down_to_step(intent.price, tick)
-            if side == "BUY"
+            if side is OrderSide.BUY
             else round_up_to_step(intent.price, tick)
         )
         if price <= 0:

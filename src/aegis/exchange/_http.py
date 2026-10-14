@@ -30,7 +30,7 @@ from aegis.exchange.signing import build_query_string, compact_json, sign_params
 from aegis.exchange.status_map import map_exchange_status
 from aegis.exchange.withdraw import assert_withdraw_forbidden
 from aegis.schemas.common import LedgerKind
-from aegis.schemas.orders import Order, OrderIntent, OrderStatus
+from aegis.schemas.orders import Order, OrderIntent, OrderSide, OrderStatus
 
 _ALLOWED_PATHS = frozenset(
     {
@@ -209,8 +209,8 @@ def raise_if_ambiguous_submit(
         )
 
 
-def signed_form_request(
-    client: httpx.Client,
+async def signed_form_request(
+    client: httpx.AsyncClient,
     *,
     method: str,
     path: str,
@@ -231,7 +231,7 @@ def signed_form_request(
     headers = _header_api_key(api_key)
     url = f"{path}?{query}"
     try:
-        response = client.request(method.upper(), url, headers=headers)
+        response = await client.request(method.upper(), url, headers=headers)
     except _AMBIGUOUS_TRANSPORT as exc:
         if client_order_id is not None:
             raise_if_ambiguous_submit(None, client_order_id=client_order_id, exc=exc)
@@ -244,8 +244,8 @@ def signed_form_request(
     return response
 
 
-def signed_v2_json_post(
-    client: httpx.Client,
+async def signed_v2_json_post(
+    client: httpx.AsyncClient,
     *,
     path: str,
     api_key: str,
@@ -271,7 +271,7 @@ def signed_v2_json_post(
         "Content-Type": "application/json",
     }
     try:
-        response = client.post(url, headers=headers, content=json_body.encode("utf-8"))
+        response = await client.post(url, headers=headers, content=json_body.encode("utf-8"))
     except _AMBIGUOUS_TRANSPORT as exc:
         if client_order_id is not None:
             raise_if_ambiguous_submit(None, client_order_id=client_order_id, exc=exc)
@@ -284,8 +284,8 @@ def signed_v2_json_post(
     return response
 
 
-def signed_v2_query(
-    client: httpx.Client,
+async def signed_v2_query(
+    client: httpx.AsyncClient,
     *,
     method: str,
     path: str,
@@ -303,9 +303,23 @@ def signed_v2_query(
     ordered["signature"] = signature
     query = build_query_string(ordered)
     headers = _header_api_key(api_key)
-    response = client.request(method.upper(), f"{path}?{query}", headers=headers)
+    response = await client.request(method.upper(), f"{path}?{query}", headers=headers)
     raise_for_rate_limit(response)
     return response
+
+
+def exchange_side(raw: Any, *, fallback: OrderSide) -> OrderSide:
+    """Map an exchange-reported side onto ``OrderSide``.
+
+    Spot reports ``BUY`` / ``SELL``. Futures v2 side spellings beyond those are not
+    verified, so anything that is not exactly BUY/SELL keeps the side we sent.
+    """
+    if raw is None:
+        return fallback
+    try:
+        return OrderSide.parse(raw)
+    except ValueError:
+        return fallback
 
 
 def order_from_exchange_payload(
@@ -341,7 +355,7 @@ def order_from_exchange_payload(
         ledger_kind=LedgerKind.LIVE,
         instrument=intent.instrument,
         status=status,
-        side=str(data.get("side", intent.side)),
+        side=exchange_side(data.get("side"), fallback=intent.side),
         order_type=str(data.get("type", intent.order_type)),
         quantity=Decimal(str(qty_raw)),
         filled_quantity=Decimal(str(filled_raw)),
