@@ -13,7 +13,7 @@ from aegis.schemas.proposal import ProposalAction
 
 
 class LlmPort(Protocol):
-    def complete_structured(
+    async def complete_structured(
         self,
         *,
         prompt: str,
@@ -30,7 +30,7 @@ class LlmPort(Protocol):
 class UnavailableLlmPort:
     """Fail closed: no fabricated proposals."""
 
-    def complete_structured(
+    async def complete_structured(
         self,
         *,
         prompt: str,

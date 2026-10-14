@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from uuid import uuid4
 
@@ -26,6 +27,8 @@ from aegis.supervisor.openai_compat import LlmRateLimitedError
 from aegis.supervisor.prompt import build_supervisor_prompt
 
 Clock = Callable[[], datetime]
+
+logger = logging.getLogger("aegis.supervisor")
 
 
 def _utcnow() -> datetime:
@@ -120,7 +123,7 @@ def _overwrite_identity(
     return TradeProposal.model_validate(data)
 
 
-def supervise(
+async def supervise(
     package: EvidencePackage,
     jev_result: JevResult,
     llm: LlmPort,
@@ -184,15 +187,27 @@ def supervise(
             supervisor_model_meta={"daily_call_cap": call_limiter.max_calls},
         )
 
-    assert budgets is not None  # budgets_allow_call already verified
+    if budgets is None:
+        # Unreachable while budgets_allow_call(None) is False; explicit (not assert)
+        # so the guard survives ``python -O`` and fails closed.
+        return no_trade_proposal(
+            package,
+            jev_result,
+            reasons=["supervisor_budgets_not_configured"],
+            strategy_id=strategy_id,
+            strategy_version=strategy_version,
+            clock=clock,
+        )
     prompt = build_supervisor_prompt(
         package,
         jev_result,
         max_stop_distance_pct=None if defaults is None else defaults.max_stop_distance_pct,
+        min_reward_risk=None if defaults is None else defaults.min_reward_risk,
+        cost_bps_round_trip=None if defaults is None else defaults.cost_bps_round_trip,
     )
     started = time.perf_counter()
     try:
-        raw = llm.complete_structured(
+        raw = await llm.complete_structured(
             prompt=prompt,
             schema_name="SupervisorDecision",
             timeout_seconds=timeout_seconds,
@@ -207,7 +222,13 @@ def supervise(
             clock=clock,
             supervisor_model_meta={"error": type(exc).__name__},
         )
-    except Exception as exc:  # noqa: BLE001 — fail closed on any provider failure
+    except Exception as exc:  # noqa: BLE001 — fail-closed boundary: provider error → NO_TRADE
+        # Class name only: provider messages may echo request/response content.
+        logger.warning(
+            "supervisor_llm_call_failed error_class=%s",
+            type(exc).__name__,
+            extra={"event": "supervisor_llm_call_failed", "component": "supervisor"},
+        )
         return no_trade_proposal(
             package,
             jev_result,
@@ -278,7 +299,9 @@ def supervise(
     if cost_raw is not None and budgets.cost_budget is not None:
         try:
             cost_value = Decimal(str(cost_raw))
-        except Exception:  # noqa: BLE001
+            if not cost_value.is_finite():
+                raise InvalidOperation("non-finite cost")
+        except (InvalidOperation, ValueError, TypeError):
             return no_trade_proposal(
                 package,
                 jev_result,

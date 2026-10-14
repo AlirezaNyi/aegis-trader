@@ -14,6 +14,7 @@ Usage (from repo root, TYPESAFE_API_KEY set in the environment or .env):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from datetime import UTC, datetime
@@ -45,7 +46,7 @@ def _shape(value: Any, depth: int = 0) -> Any:
     return type(value).__name__
 
 
-def main() -> int:
+async def _run() -> int:
     clear_settings_cache()
     settings = Settings(
         trading_mode=TradingMode.PAPER,
@@ -59,8 +60,8 @@ def main() -> int:
 
     captured: dict[str, Any] = {}
 
-    def _on_response(response: httpx.Response) -> None:
-        response.read()
+    async def _on_response(response: httpx.Response) -> None:
+        await response.aread()
         captured["status"] = response.status_code
         try:
             body = response.json()
@@ -72,7 +73,7 @@ def main() -> int:
         if response.status_code == 422 and isinstance(body, dict):
             captured["validation"] = body.get("detail")
 
-    http_client = httpx.Client(
+    http_client = httpx.AsyncClient(
         timeout=settings.jev_timeout_seconds,
         event_hooks={"response": [_on_response]},
     )
@@ -91,9 +92,9 @@ def main() -> int:
         http_client=http_client,
     )
     try:
-        result = client.evaluate(package)
+        result = await client.evaluate(package)
     finally:
-        http_client.close()
+        await http_client.aclose()
 
     print("HTTP status:", captured.get("status"))
     print("Response shape:")
@@ -116,6 +117,10 @@ def main() -> int:
         )
     )
     return 0 if result.status.value == "ok" else 1
+
+
+def main() -> int:
+    return asyncio.run(_run())
 
 
 if __name__ == "__main__":

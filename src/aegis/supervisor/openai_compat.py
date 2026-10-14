@@ -99,7 +99,11 @@ def _usage_meta(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 class OpenAICompatLlmPort:
-    """httpx-backed OpenAI-compatible structured completion port."""
+    """Async httpx-backed OpenAI-compatible structured completion port.
+
+    Inject ``http_client`` (e.g. ``httpx.AsyncClient(transport=httpx.MockTransport(...))``)
+    for tests. An injected client is owned by the caller and is not closed by ``aclose``.
+    """
 
     def __init__(
         self,
@@ -109,7 +113,7 @@ class OpenAICompatLlmPort:
         base_url: str,
         provider: str,
         timeout_seconds: float = 15.0,
-        http_client: httpx.Client | None = None,
+        http_client: httpx.AsyncClient | None = None,
         extra_headers: dict[str, str] | None = None,
     ) -> None:
         self._api_key = api_key.strip()
@@ -118,20 +122,20 @@ class OpenAICompatLlmPort:
         self._provider = provider.strip().lower()
         self._timeout_seconds = timeout_seconds
         self._owns_client = http_client is None
-        self._client = http_client or httpx.Client(timeout=timeout_seconds)
+        self._client = http_client or httpx.AsyncClient(timeout=timeout_seconds)
         self._extra_headers = dict(extra_headers or {})
 
-    def close(self) -> None:
+    async def aclose(self) -> None:
         if self._owns_client:
-            self._client.close()
+            await self._client.aclose()
 
-    def __enter__(self) -> OpenAICompatLlmPort:
+    async def __aenter__(self) -> OpenAICompatLlmPort:
         return self
 
-    def __exit__(self, *args: object) -> None:
-        self.close()
+    async def __aexit__(self, *args: object) -> None:
+        await self.aclose()
 
-    def complete_structured(
+    async def complete_structured(
         self,
         *,
         prompt: str,
@@ -167,7 +171,7 @@ class OpenAICompatLlmPort:
             "response_format": {"type": "json_object"},
         }
         try:
-            response = self._client.post(
+            response = await self._client.post(
                 url,
                 headers=headers,
                 json=body,

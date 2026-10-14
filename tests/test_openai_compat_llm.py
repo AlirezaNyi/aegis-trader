@@ -53,8 +53,8 @@ def _proposal_json() -> dict[str, Any]:
     }
 
 
-def _mock_transport(handler: Any) -> httpx.Client:
-    return httpx.Client(transport=httpx.MockTransport(handler), timeout=5.0)
+def _mock_transport(handler: Any) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=5.0)
 
 
 def test_resolve_base_url_defaults() -> None:
@@ -70,7 +70,7 @@ def test_resolve_base_url_defaults() -> None:
         resolve_base_url("anthropic")
 
 
-def test_build_llm_port_gemini() -> None:
+async def test_build_llm_port_gemini() -> None:
     clear_settings_cache()
     settings = Settings(
         trading_mode=TradingMode.PAPER,
@@ -85,7 +85,7 @@ def test_build_llm_port_gemini() -> None:
     port = build_llm_port(settings)
     assert isinstance(port, OpenAICompatLlmPort)
     assert "generativelanguage.googleapis.com" in port._base_url  # noqa: SLF001
-    port.close()
+    await port.aclose()
 
 
 def test_cost_budget_zero_allows_call() -> None:
@@ -100,7 +100,7 @@ def test_cost_budget_zero_allows_call() -> None:
     ) is False
 
 
-def test_complete_structured_parses_usage_and_zero_cost() -> None:
+async def test_complete_structured_parses_usage_and_zero_cost() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path.endswith("/chat/completions")
         assert request.headers.get("Authorization") == "Bearer test-key"
@@ -135,13 +135,13 @@ def test_complete_structured_parses_usage_and_zero_cost() -> None:
         http_client=_mock_transport(handler),
     )
     try:
-        out = port.complete_structured(
+        out = await port.complete_structured(
             prompt="test",
             schema_name="TradeProposal",
             timeout_seconds=5.0,
         )
     finally:
-        port.close()
+        await port.aclose()
 
     assert out["action"] == "NO_TRADE"
     meta = out["_meta"]
@@ -151,7 +151,7 @@ def test_complete_structured_parses_usage_and_zero_cost() -> None:
     assert "test-key" not in json.dumps(out)
 
 
-def test_http_error_does_not_echo_secret() -> None:
+async def test_http_error_does_not_echo_secret() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, text="unauthorized secret=should-not-leak")
 
@@ -164,15 +164,15 @@ def test_http_error_does_not_echo_secret() -> None:
     )
     try:
         with pytest.raises(RuntimeError, match="LLM HTTP 401") as exc_info:
-            port.complete_structured(
+            await port.complete_structured(
                 prompt="x", schema_name="TradeProposal", timeout_seconds=5.0
             )
     finally:
-        port.close()
+        await port.aclose()
     assert "super-secret-key" not in str(exc_info.value)
 
 
-def test_build_llm_port_groq_and_unknown() -> None:
+async def test_build_llm_port_groq_and_unknown() -> None:
     clear_settings_cache()
     groq = Settings(
         trading_mode=TradingMode.PAPER,
@@ -186,7 +186,7 @@ def test_build_llm_port_groq_and_unknown() -> None:
     )
     port = build_llm_port(groq)
     assert isinstance(port, OpenAICompatLlmPort)
-    port.close()
+    await port.aclose()
 
     no_budget = Settings(
         trading_mode=TradingMode.PAPER,
@@ -213,7 +213,7 @@ def test_build_llm_port_groq_and_unknown() -> None:
     assert isinstance(build_llm_port(empty), UnavailableLlmPort)
 
 
-def test_openrouter_extra_headers() -> None:
+async def test_openrouter_extra_headers() -> None:
     seen: dict[str, str] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -239,16 +239,16 @@ def test_openrouter_extra_headers() -> None:
         },
     )
     try:
-        port.complete_structured(
+        await port.complete_structured(
             prompt="p", schema_name="TradeProposal", timeout_seconds=5.0
         )
     finally:
-        port.close()
+        await port.aclose()
     assert seen["referer"] == "https://example.local"
     assert seen["title"] == "AegisTest"
 
 
-def test_build_llm_port_openrouter_wires_headers() -> None:
+async def test_build_llm_port_openrouter_wires_headers() -> None:
     clear_settings_cache()
     settings = Settings(
         trading_mode=TradingMode.PAPER,
@@ -266,7 +266,7 @@ def test_build_llm_port_openrouter_wires_headers() -> None:
     assert isinstance(port, OpenAICompatLlmPort)
     assert port._extra_headers.get("HTTP-Referer") == "https://example.local"  # noqa: SLF001
     assert port._extra_headers.get("X-Title") == "AegisTest"  # noqa: SLF001
-    port.close()
+    await port.aclose()
 
 
 def test_settings_allows_zero_cost_budget() -> None:
@@ -289,7 +289,7 @@ def test_settings_allows_zero_cost_budget() -> None:
         )
 
 
-def test_http_429_raises_rate_limited_without_body_or_retry() -> None:
+async def test_http_429_raises_rate_limited_without_body_or_retry() -> None:
     calls = {"n": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -305,11 +305,11 @@ def test_http_429_raises_rate_limited_without_body_or_retry() -> None:
     )
     try:
         with pytest.raises(LlmRateLimitedError) as exc_info:
-            port.complete_structured(
+            await port.complete_structured(
                 prompt="x", schema_name="SupervisorDecision", timeout_seconds=5.0
             )
     finally:
-        port.close()
+        await port.aclose()
     assert str(exc_info.value) == "LLM HTTP 429"
     assert isinstance(exc_info.value, RuntimeError)
     assert calls["n"] == 1
@@ -340,3 +340,87 @@ def test_settings_daily_call_cap_validation_and_limiter() -> None:
                 require_database=False,
                 llm_daily_call_cap=bad,
             )
+
+
+async def test_timeout_raises_runtime_error_without_secret() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("slow", request=request)
+
+    port = OpenAICompatLlmPort(
+        api_key="super-secret-key",
+        model="m",
+        base_url="https://api.groq.com/openai/v1",
+        provider="groq",
+        http_client=_mock_transport(handler),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="LLM request timed out") as exc_info:
+            await port.complete_structured(
+                prompt="x", schema_name="SupervisorDecision", timeout_seconds=0.1
+            )
+    finally:
+        await port.aclose()
+    assert not isinstance(exc_info.value, LlmRateLimitedError)
+    assert "super-secret-key" not in str(exc_info.value)
+
+
+async def test_transport_error_reports_class_only() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused Authorization: Bearer leak", request=request)
+
+    port = OpenAICompatLlmPort(
+        api_key="super-secret-key",
+        model="m",
+        base_url="https://api.groq.com/openai/v1",
+        provider="groq",
+        http_client=_mock_transport(handler),
+    )
+    try:
+        with pytest.raises(RuntimeError) as exc_info:
+            await port.complete_structured(
+                prompt="x", schema_name="SupervisorDecision", timeout_seconds=1.0
+            )
+    finally:
+        await port.aclose()
+    assert str(exc_info.value) == "LLM transport error: ConnectError"
+
+
+async def test_aclose_closes_owned_client_only() -> None:
+    owned = OpenAICompatLlmPort(
+        api_key="k", model="m", base_url="https://api.groq.com/openai/v1", provider="groq"
+    )
+    await owned.aclose()
+    assert owned._client.is_closed  # noqa: SLF001
+
+    injected = _mock_transport(lambda _r: httpx.Response(200))
+    async with OpenAICompatLlmPort(
+        api_key="k",
+        model="m",
+        base_url="https://api.groq.com/openai/v1",
+        provider="groq",
+        http_client=injected,
+    ):
+        pass
+    assert not injected.is_closed
+    await injected.aclose()
+
+
+async def test_unavailable_llm_port_is_async_and_fails_closed() -> None:
+    with pytest.raises(RuntimeError, match="not configured"):
+        await UnavailableLlmPort().complete_structured(
+            prompt="x", schema_name="SupervisorDecision", timeout_seconds=1.0
+        )
+
+
+def test_budget_config_all_positive_without_asserts() -> None:
+    """Explicit None checks (no asserts) so partial budgets fail closed under -O."""
+    for partial in (
+        BudgetConfig(token_budget=None, cost_budget=Decimal("0"), latency_budget_ms=1),
+        BudgetConfig(token_budget=1, cost_budget=None, latency_budget_ms=1),
+        BudgetConfig(token_budget=1, cost_budget=Decimal("0"), latency_budget_ms=None),
+        BudgetConfig(token_budget=0, cost_budget=Decimal("0"), latency_budget_ms=1),
+        BudgetConfig(token_budget=1, cost_budget=Decimal("-1"), latency_budget_ms=1),
+        BudgetConfig(token_budget=1, cost_budget=Decimal("0"), latency_budget_ms=0),
+    ):
+        assert partial.all_positive is False
+        assert budgets_allow_call(partial) is False

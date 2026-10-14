@@ -8,6 +8,7 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
+import pytest
 
 from aegis.config.settings import Settings, TradingMode
 from aegis.jev.client import TypesafeSystemOneClient
@@ -43,17 +44,18 @@ def _package(**overrides: Any) -> EvidencePackage:
     return EvidencePackage(**base)
 
 
-class _Transport(httpx.BaseTransport):
+class _Transport(httpx.AsyncBaseTransport):
     def __init__(self, handler: Any) -> None:
         self._handler = handler
         self.calls = 0
 
-    def handle_request(self, request: httpx.Request) -> httpx.Response:
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         self.calls += 1
+        await request.aread()
         return self._handler(request, self.calls)
 
 
-def test_ok_path_maps_answers_and_confidence_notes() -> None:
+async def test_ok_path_maps_answers_and_confidence_notes() -> None:
     def handler(request: httpx.Request, _call: int) -> httpx.Response:
         assert str(request.url) == SYSTEMONE_URL
         assert request.headers.get("Authorization") == "Bearer test-key"
@@ -87,9 +89,9 @@ def test_ok_path_maps_answers_and_confidence_notes() -> None:
     transport = _Transport(handler)
     client = TypesafeSystemOneClient(
         api_key="test-key",
-        http_client=httpx.Client(transport=transport),
+        http_client=httpx.AsyncClient(transport=transport),
     )
-    result = client.evaluate(_package())
+    result = await client.evaluate(_package())
     assert result.status == EvidenceStatus.OK
     assert result.model == "jev-1.13.0"
     assert result.answers["alignment"]["choice"] == "aligned_long"
@@ -103,22 +105,22 @@ def test_ok_path_maps_answers_and_confidence_notes() -> None:
     assert result.usage["input_tokens"] == 10
 
 
-def test_timeout_returns_unavailable() -> None:
+async def test_timeout_returns_unavailable() -> None:
     def handler(request: httpx.Request, _call: int) -> httpx.Response:
         raise httpx.TimeoutException("slow", request=request)
 
     transport = _Transport(handler)
     client = TypesafeSystemOneClient(
         api_key="test-key",
-        http_client=httpx.Client(transport=transport),
+        http_client=httpx.AsyncClient(transport=transport),
     )
-    result = client.evaluate(_package())
+    result = await client.evaluate(_package())
     assert result.status == EvidenceStatus.UNAVAILABLE
     assert result.answers == {}
     assert result.confidence_notes == CONFIDENCE_NOTES
 
 
-def test_429_then_success_on_retry() -> None:
+async def test_429_then_success_on_retry() -> None:
     def handler(_request: httpx.Request, call: int) -> httpx.Response:
         if call == 1:
             return httpx.Response(429, json={"error": "rate_limit"})
@@ -139,14 +141,15 @@ def test_429_then_success_on_retry() -> None:
     client = TypesafeSystemOneClient(
         api_key="test-key",
         max_retries=1,
-        http_client=httpx.Client(transport=transport),
+        retry_backoff_seconds=0.0,
+        http_client=httpx.AsyncClient(transport=transport),
     )
-    result = client.evaluate(_package())
+    result = await client.evaluate(_package())
     assert transport.calls == 2
     assert result.status == EvidenceStatus.OK
 
 
-def test_429_then_fail_returns_unavailable() -> None:
+async def test_429_then_fail_returns_unavailable() -> None:
     def handler(_request: httpx.Request, _call: int) -> httpx.Response:
         return httpx.Response(429, json={"error": "rate_limit"})
 
@@ -154,14 +157,15 @@ def test_429_then_fail_returns_unavailable() -> None:
     client = TypesafeSystemOneClient(
         api_key="test-key",
         max_retries=1,
-        http_client=httpx.Client(transport=transport),
+        retry_backoff_seconds=0.0,
+        http_client=httpx.AsyncClient(transport=transport),
     )
-    result = client.evaluate(_package())
+    result = await client.evaluate(_package())
     assert transport.calls == 2
     assert result.status == EvidenceStatus.UNAVAILABLE
 
 
-def test_529_exhausted_retries_unavailable() -> None:
+async def test_529_exhausted_retries_unavailable() -> None:
     def handler(_request: httpx.Request, _call: int) -> httpx.Response:
         return httpx.Response(529, json={"error": "overloaded"})
 
@@ -169,14 +173,15 @@ def test_529_exhausted_retries_unavailable() -> None:
     client = TypesafeSystemOneClient(
         api_key="test-key",
         max_retries=1,
-        http_client=httpx.Client(transport=transport),
+        retry_backoff_seconds=0.0,
+        http_client=httpx.AsyncClient(transport=transport),
     )
-    result = client.evaluate(_package())
+    result = await client.evaluate(_package())
     assert transport.calls == 2
     assert result.status == EvidenceStatus.UNAVAILABLE
 
 
-def test_422_returns_error_no_retry() -> None:
+async def test_422_returns_error_no_retry() -> None:
     def handler(_request: httpx.Request, _call: int) -> httpx.Response:
         return httpx.Response(422, json={"error": "invalid"})
 
@@ -184,27 +189,28 @@ def test_422_returns_error_no_retry() -> None:
     client = TypesafeSystemOneClient(
         api_key="test-key",
         max_retries=1,
-        http_client=httpx.Client(transport=transport),
+        retry_backoff_seconds=0.0,
+        http_client=httpx.AsyncClient(transport=transport),
     )
-    result = client.evaluate(_package())
+    result = await client.evaluate(_package())
     assert transport.calls == 1
     assert result.status == EvidenceStatus.ERROR
 
 
-def test_malformed_json_returns_error() -> None:
+async def test_malformed_json_returns_error() -> None:
     def handler(_request: httpx.Request, _call: int) -> httpx.Response:
         return httpx.Response(200, content=b"not-json{")
 
     transport = _Transport(handler)
     client = TypesafeSystemOneClient(
         api_key="test-key",
-        http_client=httpx.Client(transport=transport),
+        http_client=httpx.AsyncClient(transport=transport),
     )
-    result = client.evaluate(_package())
+    result = await client.evaluate(_package())
     assert result.status == EvidenceStatus.ERROR
 
 
-def test_missing_key_unavailable_without_http() -> None:
+async def test_missing_key_unavailable_without_http() -> None:
     calls = {"n": 0}
 
     def handler(_request: httpx.Request, _call: int) -> httpx.Response:
@@ -214,26 +220,26 @@ def test_missing_key_unavailable_without_http() -> None:
     transport = _Transport(handler)
     client = TypesafeSystemOneClient(
         api_key="",
-        http_client=httpx.Client(transport=transport),
+        http_client=httpx.AsyncClient(transport=transport),
     )
-    result = client.evaluate(_package())
+    result = await client.evaluate(_package())
     assert result.status == EvidenceStatus.UNAVAILABLE
     assert transport.calls == 0
     assert calls["n"] == 0
 
 
-def test_factory_missing_key_uses_unavailable_port() -> None:
+async def test_factory_missing_key_uses_unavailable_port() -> None:
     settings = Settings(
         trading_mode=TradingMode.PAPER,
         typesafe_api_key="",
         require_database=False,
     )
     port = build_jev_port(settings)
-    result = port.evaluate(_package())
+    result = await port.evaluate(_package())
     assert result.status == EvidenceStatus.UNAVAILABLE
 
 
-def test_redaction_strips_secrets_from_state() -> None:
+async def test_redaction_strips_secrets_from_state() -> None:
     now = datetime.now(tz=UTC)
     package = _package(
         analyst_evidence=[
@@ -275,9 +281,9 @@ def test_redaction_strips_secrets_from_state() -> None:
     transport = _Transport(handler)
     client = TypesafeSystemOneClient(
         api_key="test-key",
-        http_client=httpx.Client(transport=transport),
+        http_client=httpx.AsyncClient(transport=transport),
     )
-    client.evaluate(package)
+    await client.evaluate(package)
     state = captured["body"]["state"]
     assert "SHOULD_NOT_LEAK" not in state
     assert "secret-value" not in state
@@ -300,3 +306,88 @@ def test_systemone_questions_match_documented_format() -> None:
     noul = questions["long_entry_supported"]
     assert noul["type"] == "noul"
     assert set(noul["criteria"]) == {"true", "false"}
+
+
+async def test_mock_transport_success_429_timeout_paths() -> None:
+    """httpx.MockTransport on an AsyncClient: success, 429-exhausted, timeout."""
+    ok_body = {"model": "jev-1.13.0", "answers": {"alignment": {"choice": "mixed"}}}
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, json=ok_body))
+    ) as http:
+        ok = await TypesafeSystemOneClient(api_key="k", http_client=http).evaluate(_package())
+    assert ok.status == EvidenceStatus.OK
+    assert ok.answers["alignment"]["choice"] == "mixed"
+
+    calls = {"n": 0}
+
+    def rate_limited(_r: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(429, text="slow down")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(rate_limited)) as http:
+        limited = await TypesafeSystemOneClient(
+            api_key="k", max_retries=5, retry_backoff_seconds=0.0, http_client=http
+        ).evaluate(_package())
+    assert limited.status == EvidenceStatus.UNAVAILABLE
+    assert calls["n"] == 2  # retries capped at one regardless of max_retries
+
+    def timeout(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("slow", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(timeout)) as http:
+        timed_out = await TypesafeSystemOneClient(api_key="k", http_client=http).evaluate(
+            _package()
+        )
+    assert timed_out.status == EvidenceStatus.UNAVAILABLE
+    assert timed_out.answers == {}
+
+
+async def test_transport_error_returns_error_not_raise() -> None:
+    def broken(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(broken)) as http:
+        result = await TypesafeSystemOneClient(api_key="k", http_client=http).evaluate(
+            _package()
+        )
+    assert result.status == EvidenceStatus.ERROR
+
+
+async def test_retry_backoff_uses_asyncio_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    import aegis.jev.client as jev_client
+
+    slept: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        slept.append(delay)
+
+    monkeypatch.setattr(jev_client.asyncio, "sleep", fake_sleep)
+
+    def handler(_request: httpx.Request, call: int) -> httpx.Response:
+        if call == 1:
+            return httpx.Response(529)
+        return httpx.Response(200, json={"answers": {"alignment": {"choice": "mixed"}}})
+
+    transport = _Transport(handler)
+    client = TypesafeSystemOneClient(
+        api_key="k",
+        retry_backoff_seconds=0.5,
+        http_client=httpx.AsyncClient(transport=transport),
+    )
+    result = await client.evaluate(_package())
+    assert result.status == EvidenceStatus.OK
+    assert transport.calls == 2
+    assert slept == [0.5]
+
+
+async def test_aclose_closes_owned_client_only() -> None:
+    owned = TypesafeSystemOneClient(api_key="k")
+    await owned.aclose()
+    assert owned._client.is_closed  # noqa: SLF001
+
+    injected = httpx.AsyncClient(transport=httpx.MockTransport(lambda _r: httpx.Response(200)))
+    async with TypesafeSystemOneClient(api_key="k", http_client=injected):
+        pass
+    assert not injected.is_closed
+    await injected.aclose()

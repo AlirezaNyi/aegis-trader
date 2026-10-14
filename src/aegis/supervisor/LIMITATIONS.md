@@ -51,6 +51,16 @@
   from `ProposalDefaults`. The cycle derives them only from APPROVED policy values
   (`pipeline/defaults.py`). Missing or ambiguous values stay empty, so Risk rejects.
 * The model never sets notional or leverage on the compact path. HOLD / NO_TRADE are forced flat.
+* Policy 1.1 sizing (`ProposalDefaults.position_cap_usdt`, `risk_budget_usdt`, `cost_bps_round_trip`):
+  `pct_capital` ⇒ notional = position cap; `risk_pct_capital` ⇒
+  `min(cap, budget × entry / (|entry − SL| + entry × cost_bps / 10000))`; both rounded **down** to 0.01.
+  Missing inputs drop `notional` (Risk rejects). The caller must derive these only from APPROVED policy
+  values; `cost_bps_round_trip` should be a conservative upper bound (e.g. using the approved max spread)
+  because the Risk Engine re-checks `RP-MAX-RISK-PER-TRADE` with the live `RiskContext` costs and will
+  reject if actual costs exceed the sizing estimate.
+* When `ProposalDefaults.min_reward_risk` is set, the prompt marks `take_profit` REQUIRED and states the
+  net reward:risk formula with `cost_bps_round_trip`. These are hints only; numbers come from code-owned
+  defaults, never from evidence. The Risk Engine enforces `RP-MIN-REWARD-RISK` / `RP-TAKE-PROFIT-POLICY`.
 * Legacy full-`TradeProposal` payloads (with `proposal_id`) are still accepted for tests.
 * Not yet verified against a real provider: how often a given model returns valid compact JSON.
 
@@ -64,3 +74,6 @@
 * Cost is checked against provider-reported `_meta.cost` when present; free adapters map missing cost to `0`.
 * Provider free-tier rate limits change over time — re-check Groq / OpenRouter docs before relying on soak volume.
 * Jev remains TypeSafe-only (not OpenRouter).
+* `supervise()` and `LlmPort.complete_structured` are async (`httpx.AsyncClient`). Any provider exception other than
+  `LlmRateLimitedError` is a deliberate fail-closed boundary: NO_TRADE with `llm_call_failed`, logged as event
+  `supervisor_llm_call_failed` with the exception class name only. `asyncio.CancelledError` is not swallowed.

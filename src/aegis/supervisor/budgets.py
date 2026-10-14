@@ -25,16 +25,13 @@ class BudgetConfig:
     @property
     def all_positive(self) -> bool:
         """Token and latency must be > 0; cost may be 0 for free-tier providers."""
-        if not self.all_configured:
+        token = self.token_budget
+        cost = self.cost_budget
+        latency = self.latency_budget_ms
+        # Explicit None checks (not asserts): must fail closed under ``python -O``.
+        if token is None or cost is None or latency is None:
             return False
-        assert self.token_budget is not None
-        assert self.cost_budget is not None
-        assert self.latency_budget_ms is not None
-        return (
-            self.token_budget > 0
-            and self.cost_budget >= 0
-            and self.latency_budget_ms > 0
-        )
+        return token > 0 and cost >= 0 and latency > 0
 
 
 def budgets_allow_call(budgets: BudgetConfig | None) -> bool:

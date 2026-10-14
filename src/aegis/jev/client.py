@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import Any
@@ -89,7 +90,11 @@ def _error(
 
 
 class TypesafeSystemOneClient:
-    """httpx-backed System One client. Inject ``http_client`` for tests."""
+    """Async httpx-backed System One client.
+
+    Inject ``http_client`` (e.g. ``httpx.AsyncClient(transport=httpx.MockTransport(...))``)
+    for tests. An injected client is owned by the caller and is not closed by ``aclose``.
+    """
 
     def __init__(
         self,
@@ -98,8 +103,9 @@ class TypesafeSystemOneClient:
         model: str = "jev-latest",
         timeout_seconds: float = 10.0,
         max_retries: int = 1,
-        http_client: httpx.Client | None = None,
+        http_client: httpx.AsyncClient | None = None,
         base_url: str = SYSTEMONE_URL,
+        retry_backoff_seconds: float = 0.25,
     ) -> None:
         self._api_key = api_key.strip()
         self._model = model
@@ -107,20 +113,23 @@ class TypesafeSystemOneClient:
         # Cap at one retry (verified constraint vs evidence freshness).
         self._max_retries = min(max(max_retries, 0), 1)
         self._owns_client = http_client is None
-        self._client = http_client or httpx.Client(timeout=timeout_seconds)
+        self._client = http_client or httpx.AsyncClient(timeout=timeout_seconds)
         self._base_url = base_url
+        # Engineering default (not a risk-policy number): short pause before the
+        # single 429/529 retry; always bounded by the remaining transport deadline.
+        self._retry_backoff_seconds = max(retry_backoff_seconds, 0.0)
 
-    def close(self) -> None:
+    async def aclose(self) -> None:
         if self._owns_client:
-            self._client.close()
+            await self._client.aclose()
 
-    def __enter__(self) -> TypesafeSystemOneClient:
+    async def __aenter__(self) -> TypesafeSystemOneClient:
         return self
 
-    def __exit__(self, *args: object) -> None:
-        self.close()
+    async def __aexit__(self, *args: object) -> None:
+        await self.aclose()
 
-    def evaluate(self, package: EvidencePackage) -> JevResult:
+    async def evaluate(self, package: EvidencePackage) -> JevResult:
         if not self._api_key:
             return _unavailable(package, model=None, latency_ms=0)
 
@@ -151,7 +160,7 @@ class TypesafeSystemOneClient:
                 return _unavailable(package, model=self._model, latency_ms=latency_ms)
 
             try:
-                response = self._client.post(
+                response = await self._client.post(
                     self._base_url,
                     json=body,
                     headers=headers,
@@ -170,8 +179,15 @@ class TypesafeSystemOneClient:
             if status_code in _RETRYABLE_STATUS:
                 # One retry only, and only while still inside the transport deadline
                 # (proxy for evidence freshness window; no owner-approved TTL yet).
-                if attempts < max_attempts and (deadline - time.perf_counter()) > 0:
-                    continue
+                if attempts < max_attempts:
+                    backoff = min(
+                        self._retry_backoff_seconds,
+                        max(deadline - time.perf_counter(), 0.0),
+                    )
+                    if backoff > 0:
+                        await asyncio.sleep(backoff)
+                    if (deadline - time.perf_counter()) > 0:
+                        continue
                 return _unavailable(package, model=self._model, latency_ms=latency_ms)
 
             if status_code == 401:

@@ -11,6 +11,7 @@ Usage (from repo root, AEGIS_LLM_* set in the environment or .env):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -52,7 +53,7 @@ def _provider_error(body: Any) -> str | None:
     return None
 
 
-def main() -> int:
+async def _run() -> int:
     clear_settings_cache()
     settings = Settings(
         trading_mode=TradingMode.PAPER,
@@ -79,8 +80,8 @@ def main() -> int:
 
     captured: dict[str, Any] = {}
 
-    def _on_response(response: httpx.Response) -> None:
-        response.read()
+    async def _on_response(response: httpx.Response) -> None:
+        await response.aread()
         captured["status"] = response.status_code
         if response.status_code >= 400:
             try:
@@ -89,7 +90,7 @@ def main() -> int:
                 captured["provider_error"] = "non-json error body"
 
     provider = settings.llm_provider.strip().lower()
-    http_client = httpx.Client(
+    http_client = httpx.AsyncClient(
         timeout=settings.supervisor_timeout_seconds,
         event_hooks={"response": [_on_response]},
     )
@@ -102,7 +103,7 @@ def main() -> int:
         http_client=http_client,
     )
     try:
-        out = port.complete_structured(
+        out = await port.complete_structured(
             prompt=_PROMPT,
             schema_name="SupervisorDecision",
             timeout_seconds=settings.supervisor_timeout_seconds,
@@ -114,7 +115,7 @@ def main() -> int:
             print("provider error:", captured["provider_error"])
         return 1
     finally:
-        http_client.close()
+        await http_client.aclose()
 
     meta = out.pop("_meta", {})
     print("HTTP status:", captured.get("status"))
@@ -126,6 +127,10 @@ def main() -> int:
         return 1
     print("reply OK:", decision.model_dump(mode="json"))
     return 0
+
+
+def main() -> int:
+    return asyncio.run(_run())
 
 
 if __name__ == "__main__":
