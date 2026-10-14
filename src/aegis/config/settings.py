@@ -29,7 +29,10 @@ def _empty_str_to_none(value: Any) -> Any:
 class Settings(BaseSettings):
     """Runtime configuration. Secrets must come from the environment, never from source."""
 
+    # Env vars are AEGIS_<FIELD_NAME>; only DATABASE_URL and the three external
+    # credential names keep explicit aliases (see tests/test_settings.py guard).
     model_config = SettingsConfigDict(
+        env_prefix="AEGIS_",
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
@@ -39,15 +42,12 @@ class Settings(BaseSettings):
 
     trading_mode: TradingMode = Field(
         default=TradingMode.PAPER,
-        validation_alias=AliasChoices("AEGIS_TRADING_MODE", "trading_mode"),
     )
     live_armed: bool = Field(
         default=False,
-        validation_alias=AliasChoices("AEGIS_LIVE_ARMED", "live_armed"),
     )
     kill_switch: bool = Field(
         default=False,
-        validation_alias=AliasChoices("AEGIS_KILL_SWITCH", "kill_switch"),
     )
 
     database_url: str = Field(
@@ -71,7 +71,6 @@ class Settings(BaseSettings):
 
     llm_provider: str = Field(
         default="",
-        validation_alias=AliasChoices("AEGIS_LLM_PROVIDER", "llm_provider"),
         description=(
             "Owner-selected provider: gemini | openrouter | groq "
             "(empty → UnavailableLlmPort)."
@@ -79,112 +78,86 @@ class Settings(BaseSettings):
     )
     llm_api_key: str = Field(
         default="",
-        validation_alias=AliasChoices("AEGIS_LLM_API_KEY", "llm_api_key"),
     )
     llm_model: str = Field(
         default="",
-        validation_alias=AliasChoices("AEGIS_LLM_MODEL", "llm_model"),
     )
     llm_base_url: str = Field(
         default="",
-        validation_alias=AliasChoices("AEGIS_LLM_BASE_URL", "llm_base_url"),
         description="Optional OpenAI-compatible base URL override (no trailing path).",
     )
     llm_http_referer: str = Field(
         default="",
-        validation_alias=AliasChoices("AEGIS_LLM_HTTP_REFERER", "llm_http_referer"),
         description="Optional OpenRouter HTTP-Referer header (non-secret).",
     )
     llm_app_title: str = Field(
         default="Aegis",
-        validation_alias=AliasChoices("AEGIS_LLM_APP_TITLE", "llm_app_title"),
         description="Optional OpenRouter X-Title header (non-secret).",
     )
 
     log_level: str = Field(
         default="INFO",
-        validation_alias=AliasChoices("AEGIS_LOG_LEVEL", "log_level"),
     )
 
     analyst_timeout_seconds: float = Field(
         default=2.0,
-        validation_alias=AliasChoices(
-            "AEGIS_ANALYST_TIMEOUT_SECONDS", "analyst_timeout_seconds"
-        ),
         gt=0,
     )
     analyst_concurrency: int = Field(
         default=5,
-        validation_alias=AliasChoices("AEGIS_ANALYST_CONCURRENCY", "analyst_concurrency"),
         ge=1,
         le=5,
     )
 
     jev_timeout_seconds: float = Field(
         default=10.0,
-        validation_alias=AliasChoices("AEGIS_JEV_TIMEOUT_SECONDS", "jev_timeout_seconds"),
         gt=0,
     )
     jev_max_retries: int = Field(
         default=1,
-        validation_alias=AliasChoices("AEGIS_JEV_MAX_RETRIES", "jev_max_retries"),
         ge=0,
         le=1,
     )
     jev_model: str = Field(
         default="jev-latest",
-        validation_alias=AliasChoices("AEGIS_JEV_MODEL", "jev_model"),
     )
 
     supervisor_timeout_seconds: float = Field(
         default=15.0,
-        validation_alias=AliasChoices(
-            "AEGIS_SUPERVISOR_TIMEOUT_SECONDS", "supervisor_timeout_seconds"
-        ),
         gt=0,
     )
     llm_token_budget: int | None = Field(
         default=None,
-        validation_alias=AliasChoices("AEGIS_LLM_TOKEN_BUDGET", "llm_token_budget"),
     )
     llm_cost_budget: Decimal | None = Field(
         default=None,
-        validation_alias=AliasChoices("AEGIS_LLM_COST_BUDGET", "llm_cost_budget"),
     )
     llm_latency_budget_ms: int | None = Field(
         default=None,
-        validation_alias=AliasChoices(
-            "AEGIS_LLM_LATENCY_BUDGET_MS", "llm_latency_budget_ms"
-        ),
     )
     llm_daily_call_cap: int | None = Field(
         default=None,
-        validation_alias=AliasChoices("AEGIS_LLM_DAILY_CALL_CAP", "llm_daily_call_cap"),
         description="Owner-set max real Supervisor LLM calls per UTC day (empty = no cap).",
     )
 
     # When False, readiness skips DB connectivity (unit tests).
     require_database: bool = Field(
         default=True,
-        validation_alias=AliasChoices("AEGIS_REQUIRE_DATABASE", "require_database"),
     )
 
     # Paper / backtest simulation knobs — engineering assumptions only, NOT risk policy.
     paper_fee_bps: Decimal = Field(
         default=Decimal("10"),
-        validation_alias=AliasChoices("AEGIS_PAPER_FEE_BPS", "paper_fee_bps"),
         ge=0,
         description="Simulated fee in basis points (paper/backtest only).",
     )
     paper_slippage_bps: Decimal = Field(
         default=Decimal("5"),
-        validation_alias=AliasChoices("AEGIS_PAPER_SLIPPAGE_BPS", "paper_slippage_bps"),
         ge=0,
         description="Simulated slippage in basis points (paper/backtest only).",
     )
     paper_initial_balance: Decimal | None = Field(
         default=None,
-        validation_alias=AliasChoices("AEGIS_PAPER_INITIAL_BALANCE", "paper_initial_balance"),
         gt=0,
         description=(
             "Owner-set simulated starting quote balance (USDT) for the paper ledger. "
@@ -192,19 +165,53 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Owner-set risk limits for policy version 1.1 ("1.1-env"). All percentages are
+    # of the initial capital base (paper: AEGIS_PAPER_INITIAL_BALANCE). No defaults:
+    # when policy 1.1 is selected and a required value is empty, the parameter stays
+    # UNAPPROVED and the Risk Engine rejects every new trade (fail closed).
+    risk_position_pct: Decimal | None = Field(
+        default=None,
+        description="Max notional per position, % of initial capital.",
+    )
+    risk_per_trade_pct: Decimal | None = Field(
+        default=None,
+        description="Optional: loss if the stop is hit, % of initial capital (sizes by stop).",
+    )
+    risk_daily_loss_pct: Decimal | None = Field(
+        default=None,
+        description="Daily (UTC) equity loss limit, % of initial capital.",
+    )
+    risk_weekly_loss_pct: Decimal | None = Field(
+        default=None,
+        description="Weekly (ISO week, Monday 00:00 UTC) equity loss limit, % of initial capital.",
+    )
+    risk_monthly_loss_pct: Decimal | None = Field(
+        default=None,
+        description="Monthly (calendar, UTC) equity loss limit, % of initial capital.",
+    )
+    risk_max_drawdown_pct: Decimal | None = Field(
+        default=None,
+        description="Max drawdown from peak equity, % of initial capital.",
+    )
+    risk_min_reward_risk: Decimal | None = Field(
+        default=None,
+        description="Minimum reward:risk after round-trip costs (e.g. 1.5 means 1.5R).",
+    )
+    trading_fee_bps: Decimal | None = Field(
+        default=None,
+        description=(
+            "Owner-set real exchange fee per side in bps (use taker rate). When set it "
+            "replaces AEGIS_PAPER_FEE_BPS for paper fills and cost-aware risk checks."
+        ),
+    )
+
     # Paper soak runner — engineering only. Default off. Never arms live.
     paper_soak_enabled: bool = Field(
         default=False,
-        validation_alias=AliasChoices(
-            "AEGIS_PAPER_SOAK_ENABLED", "paper_soak_enabled"
-        ),
         description="When true, poll public klines and run paper cycles on new final bars.",
     )
     paper_soak_symbol: str = Field(
         default="ADAUSDT",
-        validation_alias=AliasChoices(
-            "AEGIS_PAPER_SOAK_SYMBOL", "paper_soak_symbol"
-        ),
         description=(
             "Spot symbol(s) for paper soak REST polls. "
             "Comma-separated list allowed (max 10), e.g. ADAUSDT,BTCUSDT."
@@ -212,16 +219,10 @@ class Settings(BaseSettings):
     )
     paper_soak_interval: str = Field(
         default="1m",
-        validation_alias=AliasChoices(
-            "AEGIS_PAPER_SOAK_INTERVAL", "paper_soak_interval"
-        ),
         description="Kline interval for paper soak (1m|5m|15m).",
     )
     paper_soak_poll_seconds: float = Field(
         default=30.0,
-        validation_alias=AliasChoices(
-            "AEGIS_PAPER_SOAK_POLL_SECONDS", "paper_soak_poll_seconds"
-        ),
         gt=0,
         description="Seconds between paper soak REST polls.",
     )
@@ -231,27 +232,31 @@ class Settings(BaseSettings):
     # force the all-UNAPPROVED draft. Never arms live trading by itself.
     risk_policy_version: str = Field(
         default="1.0",
-        validation_alias=AliasChoices(
-            "AEGIS_RISK_POLICY_VERSION", "risk_policy_version"
-        ),
         description="Policy snapshot id loaded by build_risk_policy_from_settings.",
+    )
+
+    # Who proposes trades: "llm" (default), "rules" (deterministic, no LLM spend) or
+    # "rules+llm" (rules propose, LLM may only veto). Risk Engine decides in all cases.
+    decision_source: str = Field(
+        default="llm",
+        description="llm | rules | rules+llm",
+    )
+    # JSON file with RuleParams (e.g. produced by scripts/walk_forward.py). Required
+    # for rules modes; missing/invalid => every cycle is NO_TRADE (fail closed).
+    rule_params_file: str | None = Field(
+        default=None,
+        description="Path to RuleParams JSON for decision_source rules / rules+llm.",
     )
 
     # Exchange transport bounds — engineering only, NOT risk-policy numbers.
     exchange_recv_window_ms: int = Field(
         default=5000,
-        validation_alias=AliasChoices(
-            "AEGIS_EXCHANGE_RECV_WINDOW_MS", "exchange_recv_window_ms"
-        ),
         ge=1,
         le=60000,
         description="Toobit SIGNED recvWindow (ms); verified max 60000.",
     )
     exchange_timeout_seconds: float = Field(
         default=10.0,
-        validation_alias=AliasChoices(
-            "AEGIS_EXCHANGE_TIMEOUT_SECONDS", "exchange_timeout_seconds"
-        ),
         gt=0,
         description="HTTP timeout for live exchange adapter (engineering bound).",
     )
@@ -292,6 +297,15 @@ class Settings(BaseSettings):
         "llm_latency_budget_ms",
         "llm_daily_call_cap",
         "paper_initial_balance",
+        "risk_position_pct",
+        "risk_per_trade_pct",
+        "risk_daily_loss_pct",
+        "risk_weekly_loss_pct",
+        "risk_monthly_loss_pct",
+        "risk_max_drawdown_pct",
+        "risk_min_reward_risk",
+        "trading_fee_bps",
+        "rule_params_file",
         mode="before",
     )
     @classmethod
@@ -327,6 +341,62 @@ class Settings(BaseSettings):
             msg = "AEGIS_LLM_DAILY_CALL_CAP must be > 0 when set"
             raise ValueError(msg)
         return self
+
+    @model_validator(mode="after")
+    def _validate_risk_percentages(self) -> Settings:
+        """Owner risk percentages: 0 < x <= 100 and nested daily <= weekly <= monthly."""
+        pct_fields = {
+            "AEGIS_RISK_POSITION_PCT": self.risk_position_pct,
+            "AEGIS_RISK_PER_TRADE_PCT": self.risk_per_trade_pct,
+            "AEGIS_RISK_DAILY_LOSS_PCT": self.risk_daily_loss_pct,
+            "AEGIS_RISK_WEEKLY_LOSS_PCT": self.risk_weekly_loss_pct,
+            "AEGIS_RISK_MONTHLY_LOSS_PCT": self.risk_monthly_loss_pct,
+            "AEGIS_RISK_MAX_DRAWDOWN_PCT": self.risk_max_drawdown_pct,
+        }
+        for name, value in pct_fields.items():
+            if value is not None and not (Decimal("0") < value <= Decimal("100")):
+                msg = f"{name} must be > 0 and <= 100 when set"
+                raise ValueError(msg)
+        chain = [
+            ("AEGIS_RISK_DAILY_LOSS_PCT", self.risk_daily_loss_pct),
+            ("AEGIS_RISK_WEEKLY_LOSS_PCT", self.risk_weekly_loss_pct),
+            ("AEGIS_RISK_MONTHLY_LOSS_PCT", self.risk_monthly_loss_pct),
+        ]
+        present = [(n, v) for n, v in chain if v is not None]
+        for (lower_name, lower), (upper_name, upper) in zip(present, present[1:], strict=False):
+            if lower > upper:
+                msg = f"{lower_name} must be <= {upper_name}"
+                raise ValueError(msg)
+        if (
+            self.risk_per_trade_pct is not None
+            and self.risk_position_pct is not None
+            and self.risk_per_trade_pct > self.risk_position_pct
+        ):
+            msg = "AEGIS_RISK_PER_TRADE_PCT must be <= AEGIS_RISK_POSITION_PCT"
+            raise ValueError(msg)
+        if self.risk_min_reward_risk is not None and self.risk_min_reward_risk <= 0:
+            msg = "AEGIS_RISK_MIN_REWARD_RISK must be > 0 when set"
+            raise ValueError(msg)
+        if self.trading_fee_bps is not None and self.trading_fee_bps < 0:
+            msg = "AEGIS_TRADING_FEE_BPS must be >= 0 when set"
+            raise ValueError(msg)
+        return self
+
+    @field_validator("decision_source", mode="before")
+    @classmethod
+    def _normalize_decision_source(cls, value: Any) -> Any:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return "llm"
+        text = str(value).strip().lower()
+        if text not in {"llm", "rules", "rules+llm"}:
+            msg = "AEGIS_DECISION_SOURCE must be one of: llm, rules, rules+llm"
+            raise ValueError(msg)
+        return text
+
+    @property
+    def effective_fee_bps(self) -> Decimal:
+        """Real owner-set fee when configured, else the paper simulation default."""
+        return self.trading_fee_bps if self.trading_fee_bps is not None else self.paper_fee_bps
 
     @property
     def is_paper_or_dev(self) -> bool:
