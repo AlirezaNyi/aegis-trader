@@ -235,9 +235,9 @@ def test_paper_package_never_imports_exchange_submit() -> None:
                 assert node.func.id not in forbidden_names
 
 
-def test_null_execution_still_refuses_live() -> None:
+async def test_null_execution_still_refuses_live() -> None:
     from aegis.interfaces.execution import NullExecutionPort
 
     port = NullExecutionPort()
     with pytest.raises(RuntimeError):
-        port.submit(_intent(ledger_kind=LedgerKind.LIVE))
+        await port.submit(_intent(ledger_kind=LedgerKind.LIVE))

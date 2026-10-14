@@ -10,18 +10,30 @@ from typing import Any
 from uuid import UUID
 
 from aegis.paper.exceptions import PaperBrokerError, PaperLedgerKindError
+from aegis.paper.protection import ClosedTrade, ProtectiveLevels
 from aegis.schemas.common import LedgerKind, MarketType
 from aegis.schemas.market import InstrumentRef
-from aegis.schemas.orders import Fill, Order, Position
+from aegis.schemas.orders import Fill, Order, OrderSide, Position
 
 
 def _instrument_key(exchange: str, market_type: str, symbol: str) -> str:
     return f"{exchange}:{market_type}:{symbol}"
 
 
+def instrument_key_for(instrument: InstrumentRef) -> str:
+    """Ledger position / protection key for an instrument."""
+    return _instrument_key(instrument.exchange, instrument.market_type.value, instrument.symbol)
+
+
 @dataclass
 class PaperLedger:
-    """Simulated orders, fills, positions, and cash balances (paper only)."""
+    """Simulated orders, fills, positions, and cash balances (paper only).
+
+    ``protections`` holds stop-loss / take-profit levels per open long position
+    (keyed like ``positions``) and is part of the snapshot. ``closed_trades`` is an
+    in-process log of realized trades (PnL / R-multiple); it is not persisted and
+    not part of the snapshot or checksum.
+    """
 
     quote_asset: str = "USDT"
     balances: dict[str, Decimal] = field(default_factory=dict)
@@ -29,6 +41,8 @@ class PaperLedger:
     fills: list[Fill] = field(default_factory=list)
     positions: dict[str, Position] = field(default_factory=dict)
     intent_ids: dict[str, UUID] = field(default_factory=dict)
+    protections: dict[str, ProtectiveLevels] = field(default_factory=dict)
+    closed_trades: list[ClosedTrade] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.quote_asset not in self.balances:
@@ -95,6 +109,7 @@ class PaperLedger:
             "fills": [f.model_dump(mode="json") for f in self.fills],
             "positions": {k: v.model_dump(mode="json") for k, v in self.positions.items()},
             "intent_ids": {k: str(v) for k, v in self.intent_ids.items()},
+            "protections": {k: v.to_json() for k, v in self.protections.items()},
             "checksum": self.checksum(),
         }
 
@@ -117,7 +132,24 @@ class PaperLedger:
             ledger.positions[str(key)] = pos
         for cid, iid in snapshot.get("intent_ids", {}).items():
             ledger.intent_ids[str(cid)] = UUID(str(iid))
+        for key, raw in (snapshot.get("protections") or {}).items():
+            ledger.protections[str(key)] = ProtectiveLevels.from_json(raw)
         return ledger
+
+    def replace_contents(self, other: PaperLedger) -> None:
+        """Adopt ``other``'s state in place (keeps references held elsewhere valid)."""
+        if other.quote_asset != self.quote_asset:
+            raise PaperBrokerError(
+                f"quote asset mismatch on restore ({other.quote_asset!r} != "
+                f"{self.quote_asset!r})"
+            )
+        self.balances = dict(other.balances)
+        self.orders = dict(other.orders)
+        self.fills = list(other.fills)
+        self.positions = dict(other.positions)
+        self.intent_ids = dict(other.intent_ids)
+        self.protections = dict(other.protections)
+        self.closed_trades = list(other.closed_trades)
 
     def clone(self) -> PaperLedger:
         return PaperLedger.from_snapshot(deepcopy(self.to_snapshot()))
@@ -126,7 +158,7 @@ class PaperLedger:
 def apply_cash_and_position(
     ledger: PaperLedger,
     *,
-    side: str,
+    side: OrderSide,
     quantity: Decimal,
     price: Decimal,
     fee: Decimal,
@@ -139,7 +171,10 @@ def apply_cash_and_position(
     position_id: UUID,
 ) -> Position:
     """Update quote cash and spot-style position after a full fill."""
-    side_u = side.strip().upper()
+    try:
+        side_e = OrderSide.parse(side)
+    except ValueError as exc:
+        raise PaperBrokerError(f"unsupported side={side!r}") from exc
     notional = quantity * price
     quote = ledger.quote_asset
     cash = ledger.get_balance(quote)
@@ -149,22 +184,20 @@ def apply_cash_and_position(
     prev_qty = existing.quantity if existing else Decimal("0")
     prev_entry = existing.entry_price if existing and existing.entry_price is not None else None
 
-    if side_u == "BUY":
+    if side_e is OrderSide.BUY:
         cash = cash - notional - fee
         new_qty = prev_qty + quantity
         if prev_qty <= 0 or prev_entry is None:
             new_entry: Decimal | None = price
         else:
             new_entry = ((prev_entry * prev_qty) + (price * quantity)) / new_qty
-    elif side_u == "SELL":
+    else:
         cash = cash + notional - fee
         new_qty = prev_qty - quantity
         if new_qty == 0:
             new_entry = None
         else:
             new_entry = prev_entry
-    else:
-        raise PaperBrokerError(f"unsupported side={side!r}")
 
     ledger.set_balance(cash, quote)
     position = Position(

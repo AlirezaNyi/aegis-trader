@@ -1,4 +1,4 @@
-"""SQLAlchemy models (Phase 1–6 + paper cycle review journal)."""
+"""SQLAlchemy models (Phase 1–6 + paper cycle review journal + paper risk-period state)."""
 
 from __future__ import annotations
 
@@ -369,6 +369,28 @@ class MarketCandleRow(Base):
     source: Mapped[str] = mapped_column(String(32), nullable=False)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class RiskPeriodStateRow(Base):
+    """Persisted paper risk-period state (one row per ledger_kind; paper only today).
+
+    ``state`` JSONB holds the equity tracker (period start equities, peak, locks,
+    cooldown, initial equity), per-position protective levels (stop-loss /
+    take-profit / entry bookkeeping) and the ledger checksum written in the same
+    transaction as the paper ledger rows. Never stores credentials.
+    """
+
+    __tablename__ = "risk_period_state"
+    __table_args__ = (UniqueConstraint("ledger_kind", name="uq_risk_period_state_ledger"),)
+
+    id: Mapped[Any] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    ledger_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    state: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),

@@ -5,7 +5,7 @@ from __future__ import annotations
 from decimal import ROUND_HALF_UP, Decimal
 
 from aegis.paper.exceptions import PaperFillError
-from aegis.schemas.orders import OrderIntent
+from aegis.schemas.orders import OrderIntent, OrderSide
 
 _BPS = Decimal("10000")
 _FEE_QUANT = Decimal("0.00000001")
@@ -34,10 +34,9 @@ def compute_fill_price(
 
     mid = Decimal(mid_price)
     slip = (mid * Decimal(slippage_bps) / _BPS).quantize(_PRICE_QUANT, rounding=ROUND_HALF_UP)
-    side = intent.side.strip().upper()
-    if side == "BUY":
+    if intent.side is OrderSide.BUY:
         return (mid + slip).quantize(_PRICE_QUANT, rounding=ROUND_HALF_UP)
-    if side == "SELL":
+    if intent.side is OrderSide.SELL:
         return (mid - slip).quantize(_PRICE_QUANT, rounding=ROUND_HALF_UP)
     raise PaperFillError(f"unsupported paper side={intent.side!r}")
 

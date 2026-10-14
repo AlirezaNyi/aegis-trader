@@ -14,7 +14,7 @@ from aegis.paper.exceptions import PaperLedgerKindError
 from aegis.paper.ledger import PaperLedger, _instrument_key
 from aegis.schemas.common import LedgerKind, MarketType
 from aegis.schemas.market import InstrumentRef
-from aegis.schemas.orders import Fill, Order, OrderStatus, Position
+from aegis.schemas.orders import Fill, Order, OrderSide, OrderStatus, Position
 
 
 def _dec_str(value: Decimal | None) -> str | None:
@@ -94,7 +94,7 @@ def _upsert_order(session: Session, order: Order) -> None:
     row.market_type = order.instrument.market_type.value
     row.symbol = order.instrument.symbol
     row.status = order.status.value
-    row.side = order.side
+    row.side = order.side.value
     row.order_type = order.order_type
     row.quantity = str(order.quantity)
     row.filled_quantity = str(order.filled_quantity)
@@ -176,7 +176,7 @@ def _order_from_row(row: OrderRow) -> Order:
             symbol=row.symbol,
         ),
         status=OrderStatus(row.status),
-        side=row.side,
+        side=OrderSide.parse(row.side),
         order_type=row.order_type,
         quantity=Decimal(row.quantity),
         filled_quantity=Decimal(row.filled_quantity),
