@@ -179,13 +179,21 @@ def compute_features(
 
     if ready("rsi_14"):
         rsi = _wilder_rsi(closes[-15:], 14)
-        assert rsi is not None
-        features["rsi_14"] = _ok(rsi)
+        if rsi is None:  # explicit check; must survive `python -O`
+            features["rsi_14"] = _null(
+                FeatureValueStatus.INSUFFICIENT_SAMPLE, "rsi window shorter than period+1"
+            )
+        else:
+            features["rsi_14"] = _ok(rsi)
 
     if ready("atr_14"):
         atr = _wilder_atr(selected[-15:], 14)
-        assert atr is not None
-        features["atr_14"] = _ok(atr)
+        if atr is None:  # explicit check; must survive `python -O`
+            features["atr_14"] = _null(
+                FeatureValueStatus.INSUFFICIENT_SAMPLE, "atr window shorter than period+1"
+            )
+        else:
+            features["atr_14"] = _ok(atr)
 
     if ready("realized_vol_20"):
         rets: list[Decimal] = []
@@ -200,8 +208,12 @@ def compute_features(
             rets.append((window_closes[i] - prev) / prev)
         else:
             stdev = _sample_stdev(rets)
-            assert stdev is not None
-            features["realized_vol_20"] = _ok(stdev)
+            if stdev is None:  # explicit check; must survive `python -O`
+                features["realized_vol_20"] = _null(
+                    FeatureValueStatus.INSUFFICIENT_SAMPLE, "fewer than 2 returns for stdev"
+                )
+            else:
+                features["realized_vol_20"] = _ok(stdev)
 
     if ready("volume_sma_20"):
         vol_sma = _sma(volumes[-20:])

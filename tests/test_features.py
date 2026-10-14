@@ -6,6 +6,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
+import pytest
+
 from aegis.features import compute_features, select_candles
 from aegis.schemas.common import MarketType, Timeframe
 from aegis.schemas.features import FeatureValueStatus
@@ -173,3 +175,45 @@ def test_include_intrabar_flag_recorded() -> None:
     )
     assert snap.include_intrabar is True
     assert snap.candle_count == 21
+
+
+def _no_assert_statements(path: str) -> list[int]:
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+    return [node.lineno for node in ast.walk(tree) if isinstance(node, ast.Assert)]
+
+
+def test_feature_engine_has_no_runtime_asserts() -> None:
+    import aegis.features.engine as engine
+
+    assert engine.__file__ is not None
+    assert _no_assert_statements(engine.__file__) == []
+
+
+def test_internal_none_yields_explicit_insufficient_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If a helper returns None after warm-up (would have tripped an `assert`), the
+    feature is an explicit INSUFFICIENT_SAMPLE value, not an exception or a silent OK."""
+    import aegis.features.engine as engine
+
+    monkeypatch.setattr(engine, "_wilder_rsi", lambda closes, period=14: None)
+    monkeypatch.setattr(engine, "_wilder_atr", lambda candles, period=14: None)
+    monkeypatch.setattr(engine, "_sample_stdev", lambda values: None)
+    start = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
+    candles = _series(30, start)
+    snap = compute_features(
+        candles,
+        instrument=_instrument(),
+        timeframe=Timeframe.M1,
+        as_of=candles[-1].close_time,
+    )
+    for name in ("rsi_14", "atr_14", "realized_vol_20"):
+        fv = snap.features[name]
+        assert fv.status == FeatureValueStatus.INSUFFICIENT_SAMPLE
+        assert fv.value is None
+        assert fv.reason
+    # Unaffected features are still computed for valid input.
+    assert snap.features["sma_20"].status == FeatureValueStatus.OK

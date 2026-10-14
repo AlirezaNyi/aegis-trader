@@ -83,6 +83,42 @@ def test_technical_ok_on_warmed_features() -> None:
     assert ev.payload["trend"] in {"up", "down", "flat"}
 
 
+def test_technical_payload_includes_raw_values_as_strings() -> None:
+    candles = _series(25)
+    snap = compute_features(
+        candles,
+        instrument=_instrument(),
+        timeframe=Timeframe.M1,
+        as_of=candles[-1].close_time,
+    )
+    ev = analyze_technical(snap, evidence_time=candles[-1].close_time)
+    assert ev.status == EvidenceStatus.OK
+    for name in ("rsi_14", "ema_20", "sma_20", "volume_ratio"):
+        raw = ev.payload[name]
+        assert isinstance(raw, str)
+        assert Decimal(raw) == snap.features[name].value
+    # Existing labels are unchanged.
+    for key in ("trend", "rsi_zone", "volatility_label", "atr_pct_vs_sma", "volume_confirm"):
+        assert key in ev.payload
+
+
+def test_technical_volume_ratio_none_when_feature_unavailable() -> None:
+    candles = _series(25)
+    snap = compute_features(
+        candles,
+        instrument=_instrument(),
+        timeframe=Timeframe.M1,
+        as_of=candles[-1].close_time,
+    )
+    features = {k: v for k, v in snap.features.items() if k != "volume_ratio"}
+    snap = snap.model_copy(update={"features": features})
+    ev = analyze_technical(snap, evidence_time=candles[-1].close_time)
+    assert ev.status == EvidenceStatus.OK
+    assert ev.payload["volume_ratio"] is None
+    assert ev.payload["volume_confirm"] == "unavailable"
+    assert isinstance(ev.payload["rsi_14"], str)
+
+
 def test_quantitative_insufficient_sample() -> None:
     candles = _series(20)
     snap = compute_features(
@@ -235,3 +271,155 @@ async def test_evidence_package_aggregates_all_analysts() -> None:
     assert package.feature_refs == [str(snap.snapshot_id)]
     assert len(package.analyst_evidence) == 5
     assert package.correlation_id == "corr-phase3"
+
+
+# --- registry (owner fix #4) -------------------------------------------------
+
+
+def test_default_registry_contents_and_order() -> None:
+    from aegis.analysts import DEFAULT_ANALYST_REGISTRY, AnalystInput
+
+    assert DEFAULT_ANALYST_REGISTRY.types() == [
+        AnalystType.TECHNICAL,
+        AnalystType.QUANTITATIVE,
+        AnalystType.NEWS_SENTIMENT,
+        AnalystType.ANALYTICAL_RISK,
+        AnalystType.STRATEGY_RESEARCHER,
+    ]
+    declared = {spec.analyst_type: spec.inputs for spec in DEFAULT_ANALYST_REGISTRY}
+    assert declared[AnalystType.TECHNICAL] == {AnalystInput.SNAPSHOT}
+    assert declared[AnalystType.QUANTITATIVE] == {AnalystInput.SNAPSHOT, AnalystInput.CANDLES}
+    assert declared[AnalystType.NEWS_SENTIMENT] == {AnalystInput.NEWS}
+    assert declared[AnalystType.ANALYTICAL_RISK] == {
+        AnalystInput.SNAPSHOT,
+        AnalystInput.SPREAD,
+        AnalystInput.FUNDING,
+    }
+    assert declared[AnalystType.STRATEGY_RESEARCHER] == {
+        AnalystInput.SNAPSHOT,
+        AnalystInput.HYPOTHESIS,
+    }
+
+
+@pytest.mark.asyncio
+async def test_runner_output_order_matches_registry() -> None:
+    candles = _series(40)
+    snap = compute_features(
+        candles, instrument=_instrument(), timeframe=Timeframe.M1, as_of=candles[-1].close_time
+    )
+    results = await run_analysts(snap, candles, evidence_time=candles[-1].close_time)
+    from aegis.analysts import DEFAULT_ANALYST_REGISTRY
+
+    assert [r.analyst_type for r in results] == DEFAULT_ANALYST_REGISTRY.types()
+
+
+def test_registry_rejects_duplicate_and_unknown_inputs() -> None:
+    from aegis.analysts import AnalystRegistry, AnalystSpec, build_default_registry
+
+    reg = build_default_registry()
+    spec = reg.get(AnalystType.TECHNICAL)
+    assert spec is not None
+    with pytest.raises(ValueError):
+        reg.register(spec)
+    reg.register(spec, replace=True)  # explicit replace allowed
+    bad = AnalystSpec(AnalystType.TECHNICAL, spec.factory, frozenset({"bogus"}))  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        AnalystRegistry([bad])
+
+
+@pytest.mark.asyncio
+async def test_extra_analyst_requires_only_registration() -> None:
+    """A new analyst is added purely by registering a spec; it receives only its
+    declared inputs (plus evidence_time) and its evidence appears in registry order."""
+    from aegis.analysts import (
+        DEFAULT_ANALYST_REGISTRY,
+        AnalystInput,
+        AnalystRegistry,
+        AnalystSpec,
+    )
+
+    candles = _series(40)
+    snap = compute_features(
+        candles, instrument=_instrument(), timeframe=Timeframe.M1, as_of=candles[-1].close_time
+    )
+    now = candles[-1].close_time
+    seen: dict[str, object] = {}
+
+    async def custom(*, evidence_time: datetime, spread: Decimal | None) -> AnalystEvidence:
+        seen["evidence_time"] = evidence_time
+        seen["spread"] = spread
+        return AnalystEvidence(
+            analyst_type=AnalystType.STRATEGY_RESEARCHER,
+            status=EvidenceStatus.OK,
+            payload={"custom": True},
+            evidence_time=evidence_time,
+            sources=[],
+        )
+
+    reg = AnalystRegistry()
+    tech = DEFAULT_ANALYST_REGISTRY.get(AnalystType.TECHNICAL)
+    assert tech is not None
+    reg.register(tech)
+    reg.register(
+        AnalystSpec(
+            AnalystType.STRATEGY_RESEARCHER, custom, frozenset({AnalystInput.SPREAD})
+        )
+    )
+    results = await run_analysts(
+        snap, candles, evidence_time=now, spread=Decimal("0.5"), registry=reg
+    )
+    assert [r.analyst_type for r in results] == [
+        AnalystType.TECHNICAL,
+        AnalystType.STRATEGY_RESEARCHER,
+    ]
+    assert results[1].payload == {"custom": True}
+    assert seen == {"evidence_time": now, "spread": Decimal("0.5")}
+
+
+@pytest.mark.asyncio
+async def test_registered_analyst_exception_becomes_error_evidence() -> None:
+    from aegis.analysts import AnalystInput, AnalystRegistry, AnalystSpec
+
+    candles = _series(40)
+    snap = compute_features(
+        candles, instrument=_instrument(), timeframe=Timeframe.M1, as_of=candles[-1].close_time
+    )
+    now = candles[-1].close_time
+
+    async def boom(*, evidence_time: datetime, snapshot: object) -> AnalystEvidence:
+        raise RuntimeError("kaboom")
+
+    reg = AnalystRegistry(
+        [AnalystSpec(AnalystType.QUANTITATIVE, boom, frozenset({AnalystInput.SNAPSHOT}))]
+    )
+    [ev] = await run_analysts(snap, candles, evidence_time=now, registry=reg)
+    assert ev.status == EvidenceStatus.ERROR
+    assert ev.payload["reason"] == "error: kaboom"
+
+
+def test_analysts_have_no_runtime_asserts() -> None:
+    root = Path(__file__).resolve().parents[1] / "src" / "aegis" / "analysts"
+    offenders = []
+    for path in sorted(root.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        offenders.extend(
+            f"{path.name}:{node.lineno}" for node in ast.walk(tree) if isinstance(node, ast.Assert)
+        )
+    assert offenders == []
+
+
+def test_technical_ok_status_with_none_value_is_unavailable() -> None:
+    """A malformed snapshot (status OK but value None) yields explicit UNAVAILABLE
+    rather than relying on an `assert` that vanishes under `python -O`."""
+    candles = _series(40)
+    snap = compute_features(
+        candles, instrument=_instrument(), timeframe=Timeframe.M1, as_of=candles[-1].close_time
+    )
+    from aegis.schemas.features import FeatureValue, FeatureValueStatus
+
+    features = dict(snap.features)
+    features["rsi_14"] = FeatureValue(value=None, status=FeatureValueStatus.OK)
+    bad = snap.model_copy(update={"features": features})
+    ev = analyze_technical(bad, evidence_time=candles[-1].close_time)
+    assert ev.status == EvidenceStatus.UNAVAILABLE
+    assert ev.payload["missing_features"] == ["rsi_14"]

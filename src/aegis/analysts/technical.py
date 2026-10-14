@@ -17,13 +17,14 @@ def analyze_technical(
     evidence_time: datetime,
 ) -> AnalystEvidence:
     critical = ("sma_20", "ema_20", "rsi_14", "atr_14")
-    missing = [
-        name
-        for name in critical
-        if snapshot.features.get(name) is None
-        or snapshot.features[name].status != FeatureValueStatus.OK
-        or snapshot.features[name].value is None
-    ]
+    values: dict[str, Decimal] = {}
+    missing: list[str] = []
+    for name in critical:
+        fv = snapshot.features.get(name)
+        if fv is None or fv.status != FeatureValueStatus.OK or fv.value is None:
+            missing.append(name)
+        else:
+            values[name] = fv.value
     if missing:
         return AnalystEvidence(
             analyst_type=AnalystType.TECHNICAL,
@@ -34,11 +35,11 @@ def analyze_technical(
             notes="Critical technical features unavailable.",
         )
 
-    sma = snapshot.features["sma_20"].value
-    ema = snapshot.features["ema_20"].value
-    rsi = snapshot.features["rsi_14"].value
-    atr = snapshot.features["atr_14"].value
-    assert sma is not None and ema is not None and rsi is not None and atr is not None
+    # Explicit narrowing (no `assert`): every critical value was checked above.
+    sma = values["sma_20"]
+    ema = values["ema_20"]
+    rsi = values["rsi_14"]
+    atr = values["atr_14"]
 
     if ema > sma:
         trend = "up"
@@ -66,6 +67,7 @@ def analyze_technical(
         vol_label = "moderate"
 
     volume_ratio = snapshot.features.get("volume_ratio")
+    volume_ratio_value: Decimal | None = None
     volume_confirm: str
     if (
         volume_ratio is None
@@ -73,12 +75,14 @@ def analyze_technical(
         or volume_ratio.value is None
     ):
         volume_confirm = "unavailable"
-    elif volume_ratio.value >= Decimal("1.2"):
-        volume_confirm = "above_average"
-    elif volume_ratio.value <= Decimal("0.8"):
-        volume_confirm = "below_average"
     else:
-        volume_confirm = "average"
+        volume_ratio_value = volume_ratio.value
+        if volume_ratio_value >= Decimal("1.2"):
+            volume_confirm = "above_average"
+        elif volume_ratio_value <= Decimal("0.8"):
+            volume_confirm = "below_average"
+        else:
+            volume_confirm = "average"
 
     payload: dict[str, Any] = {
         "trend": trend,
@@ -86,6 +90,12 @@ def analyze_technical(
         "volatility_label": vol_label,
         "atr_pct_vs_sma": str(atr_pct) if atr_pct is not None else None,
         "volume_confirm": volume_confirm,
+        # Raw feature values (Decimal as string) copied from the snapshot so
+        # downstream deterministic consumers do not re-derive them from labels.
+        "rsi_14": str(rsi),
+        "ema_20": str(ema),
+        "sma_20": str(sma),
+        "volume_ratio": str(volume_ratio_value) if volume_ratio_value is not None else None,
         "thresholds_are_descriptive_only": True,
         "not_an_order_signal": True,
         "feature_schema_version": snapshot.schema_version,
