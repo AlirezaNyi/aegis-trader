@@ -67,7 +67,7 @@ class FixtureMarketDataPort(MarketDataPort):
         start = datetime(2024, 1, 1, tzinfo=UTC)
         self._candles = build_candle_series(instrument, Timeframe.M1, start=start, count=5)
 
-    def get_candles(
+    async def get_candles(
         self,
         instrument: InstrumentRef,
         interval: Timeframe,

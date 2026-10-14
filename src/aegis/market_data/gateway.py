@@ -25,6 +25,8 @@ _EVENT_BUFFER_MAXLEN = 1024
 
 
 class MarketDataGateway(MarketDataPort):
+    """Async gateway; the REST client lifecycle (`aclose`) stays with its owner."""
+
     def __init__(
         self,
         rest: ToobitRestMarketDataClient,
@@ -46,16 +48,16 @@ class MarketDataGateway(MarketDataPort):
             self._events = deque(event_buffer, maxlen=_EVENT_BUFFER_MAXLEN)
         self._metadata_cache: list[SymbolMetadata] | None = None
 
-    def refresh_metadata(self) -> list[SymbolMetadata]:
-        self._metadata_cache = self._rest.get_exchange_info()
+    async def refresh_metadata(self) -> list[SymbolMetadata]:
+        self._metadata_cache = await self._rest.get_exchange_info()
         return list(self._metadata_cache)
 
-    def get_metadata(self) -> Sequence[SymbolMetadata]:
+    async def get_metadata(self) -> Sequence[SymbolMetadata]:
         if self._metadata_cache is None:
-            return self.refresh_metadata()
+            return await self.refresh_metadata()
         return list(self._metadata_cache)
 
-    def get_candles(
+    async def get_candles(
         self,
         instrument: InstrumentRef,
         interval: Timeframe,
@@ -68,7 +70,7 @@ class MarketDataGateway(MarketDataPort):
         # filtering is for incremental WS paths only — applying it here drops the
         # previous newest bar on re-poll and gaps the soak window.
         candles = list(
-            self._rest.get_klines(
+            await self._rest.get_klines(
                 instrument,
                 interval,
                 limit=limit,
@@ -87,7 +89,7 @@ class MarketDataGateway(MarketDataPort):
             self.tracker.observe(candles[-1])
         return candles
 
-    def get_order_book_top(
+    async def get_order_book_top(
         self,
         instrument: InstrumentRef,
         *,
@@ -95,8 +97,8 @@ class MarketDataGateway(MarketDataPort):
     ) -> OrderBookTop:
         """Best bid/ask via public depth REST (not part of MarketDataPort yet)."""
         if limit is None:
-            return self._rest.get_depth(instrument)
-        return self._rest.get_depth(instrument, limit=limit)
+            return await self._rest.get_depth(instrument)
+        return await self._rest.get_depth(instrument, limit=limit)
 
     def stream_events(self) -> Sequence[NormalizedMarketEvent]:
         return list(self._events)

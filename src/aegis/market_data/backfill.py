@@ -11,10 +11,12 @@ recent ~3,500 bars per interval; older windows return an empty list.
 
 from __future__ import annotations
 
-import time
-from collections.abc import Callable, Sequence
+import asyncio
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+
+import httpx
 
 from aegis.market_data.candle_store import CandleStore
 from aegis.market_data.constants import KLINES_MAX_LIMIT
@@ -81,7 +83,7 @@ class BackfillResult:
     errors: list[str] = field(default_factory=list)
 
 
-def backfill_instrument(
+async def backfill_instrument(
     client: ToobitRestMarketDataClient,
     store: CandleStore,
     instrument: InstrumentRef,
@@ -90,24 +92,30 @@ def backfill_instrument(
     start: datetime,
     end: datetime,
     delay_seconds: float = 0.25,
-    sleep: Callable[[float], None] = time.sleep,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> BackfillResult:
-    """Fetch windows oldest->newest and upsert finalized bars. Errors are counted, not raised."""
+    """Fetch windows oldest->newest and upsert finalized bars.
+
+    HTTP/transport errors and malformed payloads (`ValueError`, incl.
+    `MalformedKlineError` and JSON decode errors) are counted per window, not
+    raised. Other exceptions are bugs and propagate. No retries.
+    """
     result = BackfillResult(symbol=instrument.symbol, interval=interval.value)
     windows: Sequence[KlineWindow] = backfill_windows(start, end, interval)
     for index, window in enumerate(windows):
         if index > 0 and delay_seconds > 0:
-            sleep(delay_seconds)
+            await sleep(delay_seconds)
         result.windows += 1
         try:
-            candles = client.get_klines(
+            candles = await client.get_klines(
                 instrument,
                 interval,
                 limit=window.bars,
                 start_time=window.start,
                 end_time=window.end,
             )
-        except Exception as exc:  # noqa: BLE001 — keep going; report class name only
+        except (httpx.HTTPError, ValueError) as exc:
+            # Keep going; report class name only.
             result.errors.append(f"{window.start.isoformat()}:{type(exc).__name__}")
             continue
         if not candles:

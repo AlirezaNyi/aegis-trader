@@ -163,6 +163,26 @@ Plan order statuses include `ORDER_NEW`, `ORDER_FILLED`, `ORDER_REJECTED`, `ORDE
 
 ---
 
+## 3A. Binance public kline archive — research data only (not a trading venue)
+
+Aegis never trades on Binance and holds no Binance credentials. The archive is used only to give research/backtests more history than Toobit klines serve (~12 days of 5m). Rows are stored in `market_candles` with `exchange="binance"`, `source="binance-archive"`; every Toobit consumer filters by `exchange` (default `toobit`), so archive rows never feed paper/live decisions unless a caller explicitly asks for `exchange="binance"`. Code: `src/aegis/market_data/binance_archive.py`, `scripts/import_binance_archive.py`, `scripts/compare_binance_toobit.py`.
+
+Checked 2026-10-14 against https://github.com/binance/binance-public-data and live public downloads:
+
+| Fact | Status |
+| --- | --- |
+| Download base `https://data.binance.vision/`; no API key | Verified (docs + live) |
+| Monthly `data/spot/monthly/klines/<SYM>/<INT>/<SYM>-<INT>-YYYY-MM.zip`; published around the first Monday of the next month | Verified (docs + live listing) |
+| Daily `data/spot/daily/klines/<SYM>/<INT>/<SYM>-<INT>-YYYY-MM-DD.zip`; published the next day | Verified (docs + live; 2026-10-13 present on 2026-10-14, 2026-10-14 = HTTP 404) |
+| Unpublished file → HTTP 404 | Observed live |
+| Sibling `.CHECKSUM` per zip, SHA-256, content `<hex>  <zip filename>` | Verified (docs: sha256; format observed live) |
+| One CSV per zip, **no header row**; columns open_time, open, high, low, close, volume, close_time, quote_volume, trades, taker_buy_base, taker_buy_quote, ignore | Columns verified (docs); no header observed live on 2024-12, 2025-01, 2026-09 monthly and 2026-10-13 daily files. Parser still skips a leading non-numeric row |
+| SPOT timestamps in microseconds from 2025-01-01, milliseconds before | Verified (docs + live: 2024-12 = 13 digits, 2025-01 = 16 digits) |
+| close_time = open_time + interval − 1 unit (1 ms or 1 µs) | Observed live |
+| Archive files "may be updated at a later date" | Verified (docs); Aegis never revises stored bars |
+
+---
+
 ## 4. Jev / TypeSafe — verified facts
 
 | Fact | Status |

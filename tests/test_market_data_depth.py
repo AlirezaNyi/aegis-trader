@@ -106,14 +106,16 @@ def _client(captured: list[httpx.Request]) -> ToobitRestMarketDataClient:
         assert "X-BB-APIKEY" not in request.headers
         return httpx.Response(200, json=LIVE_SAMPLE)
 
-    http = httpx.Client(base_url="https://api.toobit.com", transport=httpx.MockTransport(handler))
+    http = httpx.AsyncClient(
+        base_url="https://api.toobit.com", transport=httpx.MockTransport(handler)
+    )
     return ToobitRestMarketDataClient(client=http, clock=FixedClock())
 
 
-def test_rest_get_depth_params_and_parse() -> None:
+async def test_rest_get_depth_params_and_parse() -> None:
     captured: list[httpx.Request] = []
     client = _client(captured)
-    top = client.get_depth(ADA, limit=5)
+    top = await client.get_depth(ADA, limit=5)
     assert top.best_bid == Decimal("0.2365")
     assert top.received_at == NOW
     assert captured[0].url.params["symbol"] == "ADAUSDT"
@@ -121,15 +123,15 @@ def test_rest_get_depth_params_and_parse() -> None:
 
 
 @pytest.mark.parametrize("limit", [0, -1, 101])
-def test_rest_get_depth_limit_bounds(limit: int) -> None:
+async def test_rest_get_depth_limit_bounds(limit: int) -> None:
     client = _client([])
     with pytest.raises(ValueError):
-        client.get_depth(ADA, limit=limit)
+        await client.get_depth(ADA, limit=limit)
 
 
-def test_gateway_order_book_top() -> None:
+async def test_gateway_order_book_top() -> None:
     captured: list[httpx.Request] = []
     gateway = MarketDataGateway(_client(captured), clock=FixedClock())
-    top = gateway.get_order_book_top(ADA)
+    top = await gateway.get_order_book_top(ADA)
     assert top.best_ask == Decimal("0.2366")
     assert captured[0].url.params["limit"] == "5"

@@ -13,6 +13,7 @@ Usage (from repo root, after `alembic upgrade head`):
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -53,23 +54,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     return args
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = _parse_args(argv)
-    settings = Settings(require_database=False)
-    store = CandleStore(settings.database_url)
-    if not store.enabled:
-        print(f"candle store disabled ({store.last_error or 'no database url'})")
-        return 2
-
+async def _run(args: argparse.Namespace, store: CandleStore) -> int:
     interval = Timeframe(args.interval)
     market_type = MarketType(args.market_type)
     end = datetime.now(tz=UTC)
     start = end - timedelta(days=args.days)
     exit_code = 0
-    with ToobitRestMarketDataClient() as client:
+    async with ToobitRestMarketDataClient() as client:
         for symbol in args.symbol:
             instrument = InstrumentRef(market_type=market_type, symbol=symbol)
-            result = backfill_instrument(
+            result = await backfill_instrument(
                 client,
                 store,
                 instrument,
@@ -86,6 +80,18 @@ def main(argv: list[str] | None = None) -> int:
             )
             if result.errors or store.last_error:
                 exit_code = 1
+    return exit_code
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+    settings = Settings(require_database=False)
+    store = CandleStore(settings.database_url)
+    if not store.enabled:
+        print(f"candle store disabled ({store.last_error or 'no database url'})")
+        return 2
+
+    exit_code = asyncio.run(_run(args, store))
     if store.last_error:
         print(f"store last_error={store.last_error}")
     return exit_code

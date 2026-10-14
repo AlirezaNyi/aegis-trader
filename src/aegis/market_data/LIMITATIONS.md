@@ -17,6 +17,16 @@ Verified against official Toobit docs on 2026-10-09 (Phase 2 re-check):
   filtering). Only the newest candle updates the freshness tracker. REST polls do not
   append to the optional event buffer; when a buffer is used it is capped (deque maxlen
   1024, engineering).
+* REST I/O is async (`httpx.AsyncClient`): `ToobitRestMarketDataClient` methods,
+  `MarketDataGateway.get_candles` / `get_order_book_top` / `refresh_metadata` /
+  `get_metadata`, `MarketDataPort.get_candles`, `backfill_instrument`, and the Binance
+  `ArchiveFetcher.get` / `import_symbol` are coroutines. Owners close clients with
+  `aclose()` or `async with`. No automatic retries anywhere; HTTP errors propagate
+  (`backfill_instrument` / `import_symbol` record them per window/file and continue).
+  `CandleStore` stays synchronous (blocking DB calls inside the async scripts).
+* WS reconnect/backoff triggers only on `OSError` (incl. timeouts/connection errors) and
+  `websockets` exceptions; other errors propagate. A frame with unparseable `sendTime`
+  is counted as malformed instead of failing the session.
 
 ## Order book (depth)
 
@@ -47,6 +57,37 @@ Verified against official Toobit docs on 2026-10-09 (Phase 2 re-check):
   documented here; the default 0.25 s delay is an engineering choice.
 * Finality uses the parser rule (`close_time < now`); a bar stored as final is not
   re-checked against later exchange corrections.
+
+## Binance archive (research-only history)
+
+* `binance_archive.py` imports public Binance **spot** kline zips (data.binance.vision) into
+  `market_candles` with `exchange="binance"`, `source="binance-archive"`. It is a research
+  data source only — never a trading venue, never stored as `toobit`, no credentials.
+  Facts and their verification status: `docs/API_CONTRACTS.md` §3A.
+* **Basis risk:** Binance prices are not Toobit prices. Binance spot is far deeper with
+  tighter spreads and more trades; Toobit bars may lag, deviate, or show different wicks
+  and volume. Signals, fills, slippage and fee assumptions calibrated on Binance history
+  do not transfer 1:1 to Toobit. Use `scripts/compare_binance_toobit.py` (close-diff bps
+  and 5m return correlation over the stored overlap) before relying on archive data, and
+  re-run it periodically — the overlap is only as long as stored Toobit history.
+* Volume/quote volume/trade counts are Binance-venue numbers and are not comparable to
+  Toobit volume. Taker-buy columns are not parsed or stored (no `Candle` field).
+* Each zip is SHA-256 verified against its `.CHECKSUM` before parsing or caching; a mismatch
+  skips the file and is reported. The cache (`data/binance_cache`, gitignored via `data/`)
+  stores only verified zips; a cached zip that stops verifying is re-downloaded.
+* Timestamp unit (ms before 2025-01-01, µs after) is detected per value by magnitude
+  (>= 1e14 = µs). µs `close_time` (…59.999999) is stored as-is; Toobit rows use …59.999 ms.
+  Join venues on `open_time`, never on `close_time`.
+* `received_at` is set to the bar `close_time` (archive rows were not received live).
+* A missing monthly zip (e.g. before the first-Monday publication) falls back to that
+  month's daily zips; daily files appear the next day, so the window ends at today 00:00
+  UTC. Rows with `close_time >= now` are skipped. Gaps are counted (internal holes and
+  missing-vs-window) and reported, never filled.
+* Malformed rows (non-numeric, misaligned open, close outside the bar, OHLC inconsistent,
+  non-positive price, negative volume) are counted and skipped. Archive revisions after
+  import are not picked up (`ON CONFLICT DO NOTHING`).
+* `scripts/backtest_pipeline.py` loads `exchange="toobit"` only; replaying Binance history
+  needs an explicit exchange option there (not implemented here).
 
 ## Unverified / deferred
 

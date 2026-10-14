@@ -20,7 +20,7 @@ from aegis.market_data.constants import (
     SUPPORTED_KLINE_INTERVALS,
 )
 from aegis.market_data.depth import parse_depth_top
-from aegis.market_data.klines import MalformedKlineError, parse_rest_kline_row
+from aegis.market_data.klines import parse_rest_kline_row
 from aegis.market_data.metadata import parse_exchange_info
 from aegis.market_data.timeutil import datetime_to_ms
 from aegis.schemas.common import Timeframe
@@ -29,46 +29,53 @@ from aegis.schemas.metadata import SymbolMetadata
 
 
 class ToobitRestMarketDataClient:
-    """HTTP client for public Toobit market data. Does not place orders."""
+    """Async HTTP client for public Toobit market data. Does not place orders.
+
+    Use as `async with ToobitRestMarketDataClient() as rest:` or call `aclose()`.
+    No retries: callers decide whether to re-poll.
+    """
 
     def __init__(
         self,
         *,
         base_url: str = REST_BASE_URL,
-        client: httpx.Client | None = None,
+        client: httpx.AsyncClient | None = None,
         clock: Clock | None = None,
         timeout_seconds: float = 10.0,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._owns_client = client is None
-        self._client = client or httpx.Client(base_url=self._base_url, timeout=timeout_seconds)
+        self._client = client or httpx.AsyncClient(
+            base_url=self._base_url, timeout=timeout_seconds
+        )
         self._clock = clock or SystemClock()
 
-    def close(self) -> None:
+    async def aclose(self) -> None:
+        """Close the underlying client only when this instance created it."""
         if self._owns_client:
-            self._client.close()
+            await self._client.aclose()
 
-    def __enter__(self) -> ToobitRestMarketDataClient:
+    async def __aenter__(self) -> ToobitRestMarketDataClient:
         return self
 
-    def __exit__(self, *args: object) -> None:
-        self.close()
+    async def __aexit__(self, *args: object) -> None:
+        await self.aclose()
 
-    def get_server_time(self) -> datetime:
-        response = self._client.get(PATH_TIME)
+    async def get_server_time(self) -> datetime:
+        response = await self._client.get(PATH_TIME)
         response.raise_for_status()
         payload = response.json()
         return datetime.fromtimestamp(int(payload["serverTime"]) / 1000.0, tz=UTC)
 
-    def get_exchange_info(self) -> list[SymbolMetadata]:
-        response = self._client.get(PATH_EXCHANGE_INFO)
+    async def get_exchange_info(self) -> list[SymbolMetadata]:
+        response = await self._client.get(PATH_EXCHANGE_INFO)
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):
             raise ValueError("exchangeInfo response must be an object")
         return parse_exchange_info(payload)
 
-    def get_klines(
+    async def get_klines(
         self,
         instrument: InstrumentRef,
         interval: Timeframe,
@@ -93,7 +100,7 @@ class ToobitRestMarketDataClient:
         if end_time is not None:
             params["endTime"] = datetime_to_ms(end_time)
 
-        response = self._client.get(PATH_KLINES, params=params)
+        response = await self._client.get(PATH_KLINES, params=params)
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, list):
@@ -103,22 +110,20 @@ class ToobitRestMarketDataClient:
         received_at = now
         candles: list[Candle] = []
         for row in payload:
-            try:
-                candles.append(
-                    parse_rest_kline_row(
-                        row,
-                        instrument=instrument,
-                        interval=interval,
-                        received_at=received_at,
-                        now=now,
-                        source="rest",
-                    )
+            # MalformedKlineError propagates: never guess a malformed row.
+            candles.append(
+                parse_rest_kline_row(
+                    row,
+                    instrument=instrument,
+                    interval=interval,
+                    received_at=received_at,
+                    now=now,
+                    source="rest",
                 )
-            except MalformedKlineError:
-                raise
+            )
         return candles
 
-    def get_depth(
+    async def get_depth(
         self,
         instrument: InstrumentRef,
         *,
@@ -131,7 +136,7 @@ class ToobitRestMarketDataClient:
         """
         if limit < 1 or limit > DEPTH_MAX_LIMIT:
             raise ValueError(f"limit must be 1..{DEPTH_MAX_LIMIT}")
-        response = self._client.get(
+        response = await self._client.get(
             PATH_DEPTH,
             params={"symbol": instrument.symbol, "limit": limit},
         )

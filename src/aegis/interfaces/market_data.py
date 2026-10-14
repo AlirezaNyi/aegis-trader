@@ -11,7 +11,9 @@ from aegis.schemas.market import Candle, InstrumentRef, NormalizedMarketEvent
 
 
 class MarketDataPort(Protocol):
-    def get_candles(
+    """Async candle source. `stream_events` only reads an in-memory buffer (sync)."""
+
+    async def get_candles(
         self,
         instrument: InstrumentRef,
         interval: Timeframe,
@@ -29,7 +31,7 @@ class MarketDataPort(Protocol):
 class NullMarketDataPort:
     """Stub that refuses to invent exchange data when no adapter is configured."""
 
-    def get_candles(
+    async def get_candles(
         self,
         instrument: InstrumentRef,
         interval: Timeframe,

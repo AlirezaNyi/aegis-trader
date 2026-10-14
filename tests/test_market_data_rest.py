@@ -131,12 +131,12 @@ def _handler(request: httpx.Request) -> httpx.Response:
     return httpx.Response(404, json={"error": "missing"})
 
 
-def test_exchange_info_spot_and_futures() -> None:
+async def test_exchange_info_spot_and_futures() -> None:
     transport = httpx.MockTransport(_handler)
-    client = httpx.Client(transport=transport, base_url="https://api.toobit.com")
+    client = httpx.AsyncClient(transport=transport, base_url="https://api.toobit.com")
     clock = FixedClock(datetime(2024, 1, 1, tzinfo=UTC))
     rest = ToobitRestMarketDataClient(client=client, clock=clock)
-    meta = rest.get_exchange_info()
+    meta = await rest.get_exchange_info()
     symbols = {m.symbol: m for m in meta}
     assert symbols["ETHUSDT"].market_type == MarketType.SPOT
     assert symbols["ETHUSDT"].tick_size is not None
@@ -144,15 +144,15 @@ def test_exchange_info_spot_and_futures() -> None:
     assert symbols["BTC-SWAP-USDT"].contract_multiplier is not None
 
 
-def test_klines_finalization_and_gateway_quality() -> None:
+async def test_klines_finalization_and_gateway_quality() -> None:
     transport = httpx.MockTransport(_handler)
-    http = httpx.Client(transport=transport, base_url="https://api.toobit.com")
+    http = httpx.AsyncClient(transport=transport, base_url="https://api.toobit.com")
     # During the third 1m bar (open 00:02, close ~00:02:59.999) so it is incomplete.
     clock: Clock = FixedClock(datetime(2024, 1, 1, 0, 2, 30, tzinfo=UTC))
     rest = ToobitRestMarketDataClient(client=http, clock=clock)
     gateway = MarketDataGateway(rest, clock=clock)
     instrument = InstrumentRef(market_type=MarketType.SPOT, symbol="ETHUSDT")
-    candles = list(gateway.get_candles(instrument, Timeframe.M1, limit=3))
+    candles = list(await gateway.get_candles(instrument, Timeframe.M1, limit=3))
     assert len(candles) == 3
     assert candles[0].is_final is True
     assert candles[1].is_final is True
@@ -162,16 +162,16 @@ def test_klines_finalization_and_gateway_quality() -> None:
     assert snap["stale"] is False
 
 
-def test_gateway_rest_repoll_keeps_previous_newest_bar() -> None:
+async def test_gateway_rest_repoll_keeps_previous_newest_bar() -> None:
     """Historical REST batches must not drop the prior tip via stream-duplicate filter."""
     transport = httpx.MockTransport(_handler)
-    http = httpx.Client(transport=transport, base_url="https://api.toobit.com")
+    http = httpx.AsyncClient(transport=transport, base_url="https://api.toobit.com")
     clock: Clock = FixedClock(datetime(2024, 1, 1, 0, 2, 30, tzinfo=UTC))
     rest = ToobitRestMarketDataClient(client=http, clock=clock)
     gateway = MarketDataGateway(rest, clock=clock)
     instrument = InstrumentRef(market_type=MarketType.SPOT, symbol="ETHUSDT")
-    first = list(gateway.get_candles(instrument, Timeframe.M1, limit=3))
-    second = list(gateway.get_candles(instrument, Timeframe.M1, limit=3))
+    first = list(await gateway.get_candles(instrument, Timeframe.M1, limit=3))
+    second = list(await gateway.get_candles(instrument, Timeframe.M1, limit=3))
     assert len(first) == 3
     assert len(second) == 3
     assert [c.open_time for c in first] == [c.open_time for c in second]
@@ -180,20 +180,20 @@ def test_gateway_rest_repoll_keeps_previous_newest_bar() -> None:
     assert snap["stale"] is False
 
 
-def test_malformed_kline_raises() -> None:
+async def test_malformed_kline_raises() -> None:
     def bad_handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/quote/v1/klines"):
             return httpx.Response(200, json=[["not-a-number"]])
         return _handler(request)
 
     transport = httpx.MockTransport(bad_handler)
-    http = httpx.Client(transport=transport, base_url="https://api.toobit.com")
+    http = httpx.AsyncClient(transport=transport, base_url="https://api.toobit.com")
     rest = ToobitRestMarketDataClient(
         client=http, clock=FixedClock(datetime(2024, 1, 1, tzinfo=UTC))
     )
     instrument = InstrumentRef(market_type=MarketType.SPOT, symbol="ETHUSDT")
     with pytest.raises(MalformedKlineError):
-        rest.get_klines(instrument, Timeframe.M1, limit=1)
+        await rest.get_klines(instrument, Timeframe.M1, limit=1)
 
 
 def test_kline_zero_close_time_is_derived_and_in_progress_bar_not_final() -> None:
@@ -214,3 +214,59 @@ def test_kline_zero_close_time_is_derived_and_in_progress_bar_not_final() -> Non
         row, instrument=instrument, interval=Timeframe.M5, received_at=after, now=after
     )
     assert final.is_final is True
+
+
+async def test_server_time_and_owned_client_lifecycle() -> None:
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(_handler), base_url="https://api.toobit.com"
+    )
+    async with ToobitRestMarketDataClient(
+        client=http, clock=FixedClock(datetime(2024, 1, 1, tzinfo=UTC))
+    ) as rest:
+        server_time = await rest.get_server_time()
+    assert server_time == datetime.fromtimestamp(1_700_000_000, tz=UTC)
+    # Injected clients are owned by the caller and stay open after aexit.
+    assert http.is_closed is False
+    await http.aclose()
+
+    owned = ToobitRestMarketDataClient()
+    await owned.aclose()
+    assert owned._client.is_closed is True
+
+
+async def test_gateway_metadata_cached_after_first_fetch() -> None:
+    calls: list[str] = []
+
+    def counting(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return _handler(request)
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(counting), base_url="https://api.toobit.com"
+    )
+    clock = FixedClock(datetime(2024, 1, 1, tzinfo=UTC))
+    gateway = MarketDataGateway(ToobitRestMarketDataClient(client=http, clock=clock), clock=clock)
+    first = await gateway.get_metadata()
+    second = await gateway.get_metadata()
+    assert [m.symbol for m in first] == [m.symbol for m in second]
+    assert calls == ["/api/v1/exchangeInfo"]
+    await gateway.refresh_metadata()
+    assert len(calls) == 2
+
+
+async def test_http_error_status_propagates_without_retry() -> None:
+    calls: list[str] = []
+
+    def failing(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(503)
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(failing), base_url="https://api.toobit.com"
+    )
+    clock = FixedClock(datetime(2024, 1, 1, tzinfo=UTC))
+    rest = ToobitRestMarketDataClient(client=http, clock=clock)
+    instrument = InstrumentRef(market_type=MarketType.SPOT, symbol="ETHUSDT")
+    with pytest.raises(httpx.HTTPStatusError):
+        await rest.get_klines(instrument, Timeframe.M1, limit=1)
+    assert len(calls) == 1

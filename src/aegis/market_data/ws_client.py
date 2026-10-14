@@ -14,6 +14,8 @@ from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from typing import Any
 
+from websockets.exceptions import WebSocketException
+
 from aegis.market_data.constants import WS_BASE_URL, WS_MARKET_PATH, WS_PING_INTERVAL_SECONDS
 from aegis.market_data.klines import MalformedKlineError, parse_ws_kline_payload
 from aegis.market_data.metrics import MarketDataMetrics
@@ -22,6 +24,11 @@ from aegis.schemas.common import MarketType, Timeframe
 from aegis.schemas.market import Candle, NormalizedMarketEvent
 
 logger = logging.getLogger("aegis.market_data.ws")
+
+# Session failures that trigger reconnect/backoff: socket/DNS/timeout errors
+# (OSError covers ConnectionError and TimeoutError) and websockets protocol /
+# handshake / closed-connection errors. Anything else is a bug and propagates.
+_SESSION_ERRORS: tuple[type[BaseException], ...] = (OSError, WebSocketException)
 
 
 class ToobitWsMarketDataClient:
@@ -72,8 +79,12 @@ class ToobitWsMarketDataClient:
             except asyncio.CancelledError:
                 self._running = False
                 raise
-            except Exception:
-                logger.exception("websocket session failed; reconnecting")
+            except _SESSION_ERRORS as exc:
+                logger.warning(
+                    "websocket session failed err=%s; reconnecting",
+                    type(exc).__name__,
+                    extra={"event": "market_ws_session_failed", "component": "market_data_ws"},
+                )
                 self.metrics.mark_connected(False)
                 self.metrics.record_reconnect()
                 await asyncio.sleep(backoff)
@@ -135,9 +146,14 @@ class ToobitWsMarketDataClient:
         topic = str(message.get("topic", ""))
         symbol = str(message.get("symbol", ""))
         send_time = message.get("sendTime")
-        exchange_event_at = (
-            datetime.fromtimestamp(int(send_time) / 1000.0, tz=UTC) if send_time else None
-        )
+        try:
+            exchange_event_at = (
+                datetime.fromtimestamp(int(send_time) / 1000.0, tz=UTC) if send_time else None
+            )
+        except (TypeError, ValueError, OverflowError, OSError):
+            # Unparseable sendTime is a malformed frame, not a session failure.
+            self.metrics.record_malformed()
+            return
         self.metrics.record_event(received_at=received, exchange_event_at=exchange_event_at)
         self.events.append(
             NormalizedMarketEvent(

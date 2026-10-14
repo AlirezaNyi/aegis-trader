@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+import httpx
 import pytest
 from sqlalchemy.dialects import postgresql
 
@@ -140,12 +141,14 @@ class _FakeClient:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
-    def get_klines(self, instrument: InstrumentRef, interval: Timeframe, **kw: Any) -> list[Candle]:
+    async def get_klines(
+        self, instrument: InstrumentRef, interval: Timeframe, **kw: Any
+    ) -> list[Candle]:
         self.calls.append(kw)
         if len(self.calls) == 2:
             return []
         if len(self.calls) == 3:
-            raise RuntimeError("boom")
+            raise httpx.ConnectError("boom")
         start: datetime = kw["start_time"]
         return [_candle(start), _candle(start + timedelta(minutes=5), final=False)]
 
@@ -159,11 +162,15 @@ class _FakeStore:
         return len([c for c in candles if c.is_final])
 
 
-def test_backfill_instrument_paginates_oldest_first() -> None:
+async def test_backfill_instrument_paginates_oldest_first() -> None:
     client = _FakeClient()
     store = _FakeStore()
     sleeps: list[float] = []
-    result = backfill_instrument(
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    result = await backfill_instrument(
         client,  # type: ignore[arg-type]
         store,  # type: ignore[arg-type]
         ADA,
@@ -171,7 +178,7 @@ def test_backfill_instrument_paginates_oldest_first() -> None:
         start=T0,
         end=T0 + timedelta(minutes=5 * 3500),
         delay_seconds=0.1,
-        sleep=sleeps.append,
+        sleep=fake_sleep,
     )
     starts = [c["start_time"] for c in client.calls]
     assert starts == sorted(starts) and len(starts) == 4
@@ -179,6 +186,25 @@ def test_backfill_instrument_paginates_oldest_first() -> None:
     assert sleeps == [0.1, 0.1, 0.1]
     assert result.windows == 4
     assert result.empty_windows == 1
-    assert len(result.errors) == 1 and result.errors[0].endswith("RuntimeError")
+    assert len(result.errors) == 1 and result.errors[0].endswith("ConnectError")
     assert result.fetched == 4 and result.final == 2 and result.inserted == 2
     assert all(c.is_final for batch in store.batches for c in batch)
+
+
+async def test_backfill_unexpected_error_propagates() -> None:
+    """Only HTTP/transport and malformed-payload errors are swallowed per window."""
+
+    class _BuggyClient:
+        async def get_klines(self, *args: Any, **kw: Any) -> list[Candle]:
+            raise RuntimeError("bug")
+
+    with pytest.raises(RuntimeError):
+        await backfill_instrument(
+            _BuggyClient(),  # type: ignore[arg-type]
+            _FakeStore(),  # type: ignore[arg-type]
+            ADA,
+            Timeframe.M5,
+            start=T0,
+            end=T0 + timedelta(minutes=10),
+            delay_seconds=0,
+        )

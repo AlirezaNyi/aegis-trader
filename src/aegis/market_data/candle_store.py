@@ -13,9 +13,10 @@ from threading import Lock
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import Insert as PgInsert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from aegis.db.models import MarketCandleRow
@@ -121,7 +122,8 @@ class CandleStore:
             try:
                 engine = create_engine_from_url(database_url)
                 self._session_factory = sessionmaker(bind=engine, expire_on_commit=False)
-            except Exception as exc:  # noqa: BLE001 — fail open
+            except (SQLAlchemyError, ImportError, ValueError) as exc:
+                # Bad URL / unknown dialect / missing DB driver: store disabled.
                 self._record_error("engine_init", exc)
                 self._session_factory = None
 
@@ -156,7 +158,7 @@ class CandleStore:
                 inserted = len(result.fetchall())
                 session.commit()
                 return inserted
-        except Exception as exc:  # noqa: BLE001 — fail open
+        except Exception as exc:  # noqa: BLE001 — fail-open DB boundary; logs event+class
             self._record_error("upsert", exc)
             return 0
 
@@ -186,6 +188,31 @@ class CandleStore:
             with self._session_factory() as session:
                 rows = list(session.scalars(stmt))
             return [row_to_candle(row) for row in rows]
-        except Exception as exc:  # noqa: BLE001 — fail open
+        except Exception as exc:  # noqa: BLE001 — fail-open DB boundary; logs event+class
             self._record_error("load", exc)
             return []
+
+    def time_bounds(
+        self, instrument: InstrumentRef, interval: Timeframe
+    ) -> tuple[datetime, datetime] | None:
+        """(min open_time, max open_time) stored for the key, or None (empty/disabled/error)."""
+        if self._session_factory is None:
+            return None
+        stmt = select(
+            func.min(MarketCandleRow.open_time), func.max(MarketCandleRow.open_time)
+        ).where(
+            MarketCandleRow.exchange == instrument.exchange,
+            MarketCandleRow.market_type == instrument.market_type.value,
+            MarketCandleRow.symbol == instrument.symbol,
+            MarketCandleRow.interval == interval.value,
+        )
+        try:
+            with self._session_factory() as session:
+                row = session.execute(stmt).one()
+        except Exception as exc:  # noqa: BLE001 — fail-open DB boundary; logs event+class
+            self._record_error("bounds", exc)
+            return None
+        first, last = row[0], row[1]
+        if first is None or last is None:
+            return None
+        return first, last

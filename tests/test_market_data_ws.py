@@ -106,3 +106,48 @@ def test_subscribe_message_shape() -> None:
     assert msg["topic"] == "kline_5m"
     assert msg["event"] == "sub"
     assert msg["symbol"] == "ETHUSDT,BTCUSDT"
+
+
+async def test_ws_bad_send_time_is_malformed_not_session_failure() -> None:
+    metrics = MarketDataMetrics()
+    client = ToobitWsMarketDataClient(symbols=["BTCUSDT"], interval=Timeframe.M1, metrics=metrics)
+    frame = {"symbol": "BTCUSDT", "topic": "kline_1m", "sendTime": "nope", "data": []}
+    await client.handle_message_text(json.dumps(frame))
+    assert metrics.malformed == 1
+    assert client.events == []
+
+
+async def test_ws_reconnects_on_transport_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    metrics = MarketDataMetrics()
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("aegis.market_data.ws_client.asyncio.sleep", fake_sleep)
+    attempts: list[str] = []
+
+    def connect(url: str) -> object:
+        attempts.append(url)
+        if len(attempts) >= 2:
+            client.stop()
+        raise ConnectionRefusedError("refused")
+
+    client = ToobitWsMarketDataClient(
+        symbols=["BTCUSDT"], interval=Timeframe.M1, metrics=metrics, connect=connect
+    )
+    await client.run_forever()
+    assert len(attempts) == 2
+    assert metrics.reconnects == 2
+    assert sleeps == [1.0, 2.0]
+
+
+async def test_ws_unexpected_error_propagates() -> None:
+    def connect(url: str) -> object:
+        raise RuntimeError("bug")
+
+    client = ToobitWsMarketDataClient(
+        symbols=["BTCUSDT"], interval=Timeframe.M1, connect=connect
+    )
+    with pytest.raises(RuntimeError):
+        await client.run_forever()
