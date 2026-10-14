@@ -36,6 +36,11 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "integration_db: needs a real Postgres (set AEGIS_TEST_DATABASE_URL)",
+    "integration_public: calls public Toobit market-data endpoints (set AEGIS_TEST_PUBLIC_NETWORK=1)",
+    "integration_order_test: signed Toobit /api/v1/spot/orderTest only, no funds move (set AEGIS_TEST_TOOBIT_ORDER_TEST=1)",
+]
 
 [project.scripts]
 aegis = "aegis.main:run"
