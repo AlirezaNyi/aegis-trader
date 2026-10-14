@@ -6,6 +6,19 @@
 * Set `AEGIS_RISK_POLICY_VERSION=0.1-draft` to force all financial params UNAPPROVED (BUY/SELL always REJECT on those rules).
 * Unknown version ids fail closed to the draft.
 
+## Owner policy 1.1-env
+
+* `AEGIS_RISK_POLICY_VERSION=1.1` (or `1.1-env`) loads `owner_v1_1.owner_env_policy_v1_1`: v1.0 plus owner env limits as % of `AEGIS_PAPER_INITIAL_BALANCE` (see `docs/RISK_POLICY.md` §9). Effective version `1.1-env+<sha256[:8]>`.
+* The capital base is the **initial** balance, not current equity: limits do not shrink after losses or grow after gains. In live mode the base is still `AEGIS_PAPER_INITIAL_BALANCE` (the setting name is paper-specific); the owner must set it to the real capital before arming.
+* **Live is blocked for 1.1-env:** `RP-ENV-POLICY-LIVE` rejects every new trade when `trading_mode=live` and the policy version starts with `1.1-env` (safety review H2). Lifting it needs owner decisions on env-as-live-approval and a live capital-base setting (`docs/RISK_POLICY.md` §9).
+* `RP-MAX-AGGREGATE-NOTIONAL` under 1.1 is `min(position cap × max open positions, C)`: structurally no more than 100% of the capital base (no spot leverage). No other upper bounds on 1.1 percentages exist beyond settings validation (`<= 100`).
+* Missing env ⇒ derived params UNAPPROVED ⇒ every new trade REJECTs. `missing_policy_env()` lists names; the parent must surface it at startup.
+* `RP-WEEKLY-LOSS-LIMIT`, `RP-MONTHLY-LOSS-LIMIT`, `RP-MAX-RISK-PER-TRADE`, `RP-MIN-REWARD-RISK` are in `OPTIONAL_FINANCIAL_PARAM_IDS`: enforced only when present in the policy (absent in v1.0 and the draft), REJECT when present but UNAPPROVED.
+* The engine does **not** compute `weekly_loss`, `monthly_loss`, or `period_lock_until`; the caller must supply them (None ⇒ REJECT for the loss rules; None ⇒ no lock). Period boundaries (ISO week, calendar month, UTC) are the caller's responsibility.
+* Cost-aware rules use `RiskContext.fee_estimate` (bps per side), `spread` (bps, full spread), and `slippage_model_bps` (bps per side). Round-trip cost per unit = `entry × (2·fee + spread + 2·slippage) / 10000`. This is a model: actual fills, maker/taker mix, and stop slippage can differ. Negative inputs (e.g. maker rebates) are rejected rather than credited.
+* `RP-MAX-RISK-PER-TRADE` bounds the planned loss at the stop price plus modeled costs; stop fills are not guaranteed (gaps, no stop order resting on the exchange) so realized loss can exceed it.
+* `RP-PERIOD-LOCK` is structural (all policy versions) and only reflects what the caller sets.
+
 ## Emergency cancel / protect (ADR 0006)
 
 * v1.0 marks `RP-EMERGENCY-CANCEL` / `RP-EMERGENCY-PROTECT` as APPROVED **false** (manual only).

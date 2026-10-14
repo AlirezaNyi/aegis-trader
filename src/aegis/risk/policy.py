@@ -64,6 +64,22 @@ NEW_TRADE_REQUIRED_PARAM_IDS: tuple[str, ...] = tuple(
     if pid not in {"RP-EMERGENCY-CANCEL", "RP-EMERGENCY-PROTECT"}
 )
 
+# Financial params enforced only when present in a policy snapshot (policy 1.1+).
+# Deliberately NOT in FINANCIAL_PARAM_IDS so owner v1.0 and the draft are unchanged.
+# When present but UNAPPROVED, the engine rejects every new trade on them.
+OPTIONAL_FINANCIAL_PARAM_IDS: tuple[str, ...] = (
+    "RP-WEEKLY-LOSS-LIMIT",
+    "RP-MONTHLY-LOSS-LIMIT",
+    "RP-MAX-RISK-PER-TRADE",
+    "RP-MIN-REWARD-RISK",
+)
+
+# Enum values shared by the policy loader, the engine, and proposal sizing.
+SIZING_METHOD_FIXED_NOTIONAL = "fixed_notional"
+SIZING_METHOD_PCT_CAPITAL = "pct_capital"
+SIZING_METHOD_RISK_PCT_CAPITAL = "risk_pct_capital"
+TAKE_PROFIT_POLICY_REQUIRED = "required"
+
 ENGINEERING_DEFAULT_PARAMS: dict[str, PolicyParam] = {
     "RP-MODE-DEFAULT": PolicyParam(
         id="RP-MODE-DEFAULT",

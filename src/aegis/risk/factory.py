@@ -4,18 +4,29 @@ from __future__ import annotations
 
 from aegis.config.settings import Settings
 from aegis.risk.owner_v1 import OWNER_V1_VERSION, owner_approved_policy_v1
+from aegis.risk.owner_v1_1 import (
+    OWNER_V1_1_ALIASES,
+    missing_policy_env,
+    owner_env_policy_v1_1,
+)
 from aegis.risk.policy import RiskPolicy, default_draft_policy
+
+__all__ = ["build_risk_policy_from_settings", "missing_policy_env"]
 
 
 def build_risk_policy_from_settings(settings: Settings) -> RiskPolicy:
     """Load policy by ``AEGIS_RISK_POLICY_VERSION``.
 
-    Unknown versions fail closed to the draft (no invented numbers).
+    ``1.0`` → owner v1.0 snapshot. ``1.1`` / ``1.1-env`` → owner env policy
+    (percent of initial capital); missing env values stay UNAPPROVED so new
+    trades REJECT. Unknown versions fail closed to the draft (no invented numbers).
     Live still requires non-draft + live gates; this factory never arms live.
     """
     version = settings.risk_policy_version.strip().lower()
     if version in {OWNER_V1_VERSION, "1", "1.0"}:
         return owner_approved_policy_v1()
+    if version in OWNER_V1_1_ALIASES:
+        return owner_env_policy_v1_1(settings)
     if version in {"", "draft", "0.1-draft"}:
         return default_draft_policy()
     # Fail closed: do not invent an unknown version's numbers.

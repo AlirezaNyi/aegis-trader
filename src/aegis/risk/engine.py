@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_DOWN, ROUND_UP, Decimal, InvalidOperation
 from typing import Any
 
 from aegis.config.settings import Settings, TradingMode
 from aegis.guards.live import trading_ready
 from aegis.risk.context import RiskContext
+from aegis.risk.owner_v1_1 import OWNER_V1_1_ENV_PREFIX
 from aegis.risk.policy import (
     NEW_TRADE_REQUIRED_PARAM_IDS,
+    OPTIONAL_FINANCIAL_PARAM_IDS,
+    TAKE_PROFIT_POLICY_REQUIRED,
     ParamStatus,
     RiskPolicy,
     default_draft_policy,
@@ -31,6 +34,16 @@ _STOP_NOT_GUARANTEED = (
 _RULE_STOP_SIDE = "RP-STOP-LOSS-SIDE"
 _RULE_TP_SIDE = "RP-TAKE-PROFIT-SIDE"
 _RULE_ENTRY_VS_BOOK = "RP-ENTRY-VS-BOOK"
+# Caller-set lock after a loss-limit breach (structural; no owner number).
+_RULE_PERIOD_LOCK = "RP-PERIOD-LOCK"
+# Policy 1.1+ params, enforced only when present in the active policy snapshot.
+_RULE_WEEKLY_LOSS = "RP-WEEKLY-LOSS-LIMIT"
+_RULE_MONTHLY_LOSS = "RP-MONTHLY-LOSS-LIMIT"
+_RULE_MIN_REWARD_RISK = "RP-MIN-REWARD-RISK"
+_RULE_MAX_RISK_PER_TRADE = "RP-MAX-RISK-PER-TRADE"
+_BPS = Decimal("10000")
+_RATIO_DISPLAY = Decimal("0.0001")
+_USDT_DISPLAY = Decimal("0.00000001")
 # Order types for which a declared entry_price is a resting limit price. A
 # missing order_type is treated as LIMIT because intent building defaults to it.
 _MARKET_ORDER_TYPES = frozenset({"MARKET"})
@@ -84,6 +97,18 @@ def evaluate_risk(
             "RP-POLICY-VERSION",
             "trading_mode=live cannot use a draft policy version "
             f"({active.policy_version!r}); owner-approved policy required",
+        )
+
+    # --- 0b. Env-derived policy 1.1 is paper-only (safety review H2) ---
+    # Structural gate, no numbers: env values are accepted as owner approval for
+    # paper only. Live needs a recorded owner live approval and a live capital
+    # base, neither of which exists yet (docs/RISK_POLICY.md §9).
+    _mark("RP-ENV-POLICY-LIVE")
+    if live_mode and active.policy_version.strip().lower().startswith(OWNER_V1_1_ENV_PREFIX):
+        _fail(
+            "RP-ENV-POLICY-LIVE",
+            "env-derived policy 1.1 is paper-only until owner records live approval "
+            f"and a live capital base (policy_version={active.policy_version!r})",
         )
 
     # --- 1. Kill switch ---
@@ -336,6 +361,44 @@ def evaluate_risk(
                 f"drawdown={context.drawdown} > limit={dd}",
             )
 
+    # --- Weekly / monthly loss (policy 1.1+; only when present in the policy) ---
+    for period_rule, period_loss, label in (
+        (_RULE_WEEKLY_LOSS, context.weekly_loss, "weekly_loss"),
+        (_RULE_MONTHLY_LOSS, context.monthly_loss, "monthly_loss"),
+    ):
+        if active.get(period_rule) is None:
+            continue
+        period_limit = _need_approved(period_rule)
+        if period_limit is None:
+            continue
+        observed = _try_decimal(period_loss)
+        limit_dec = _try_decimal(period_limit)
+        if observed is None:
+            _fail(period_rule, f"{label} missing or non-numeric ({period_loss!r})")
+        elif limit_dec is None:
+            _fail(period_rule, f"approved limit is non-numeric ({period_limit!r})")
+        elif observed > limit_dec:
+            _fail(period_rule, f"{label}={observed} > limit={limit_dec}")
+
+    # --- Period lock (structural; caller sets it after a loss-limit breach) ---
+    _mark(_RULE_PERIOD_LOCK)
+    if context.period_lock_until is not None:
+        try:
+            locked = context.now < context.period_lock_until
+        except TypeError:
+            # Naive vs aware datetimes cannot be ordered: fail closed.
+            _fail(
+                _RULE_PERIOD_LOCK,
+                "period_lock_until is not comparable with now (timezone mismatch)",
+            )
+        else:
+            if locked:
+                _fail(
+                    _RULE_PERIOD_LOCK,
+                    "new trades locked until "
+                    f"{context.period_lock_until.isoformat()} after a loss-limit breach",
+                )
+
     sizing_method = _need_approved("RP-SIZING-METHOD")
     if sizing_method is not None:
         method = proposal.sizing.get("method") or proposal.sizing.get("sizing_method")
@@ -444,7 +507,11 @@ def evaluate_risk(
                 )
 
     tp_policy = _need_approved("RP-TAKE-PROFIT-POLICY")
-    if tp_policy is not None and tp_policy is True and proposal.take_profit is None:
+    if (
+        tp_policy is not None
+        and _take_profit_required(tp_policy)
+        and proposal.take_profit is None
+    ):
         _fail("RP-TAKE-PROFIT-POLICY", "take_profit required by approved policy")
 
     # --- Stop-loss / take-profit side vs entry (structural, non-numeric) ---
@@ -460,6 +527,49 @@ def evaluate_risk(
         err = _level_side_error(proposal, proposal.take_profit, protective=False)
         if err is not None:
             _fail(_RULE_TP_SIDE, f"take_profit {err}")
+
+    # --- Net reward:risk after round-trip costs (policy 1.1+; when present) ---
+    reward_risk_net: Decimal | None = None
+    if active.get(_RULE_MIN_REWARD_RISK) is not None:
+        min_rr = _need_approved(_RULE_MIN_REWARD_RISK)
+        if min_rr is not None:
+            min_rr_dec = _try_decimal(min_rr)
+            r_net, rr_err = _net_reward_risk(proposal, context)
+            if min_rr_dec is None:
+                _fail(_RULE_MIN_REWARD_RISK, f"approved minimum is non-numeric ({min_rr!r})")
+            elif rr_err is not None or r_net is None:
+                _fail(_RULE_MIN_REWARD_RISK, f"cannot compute net reward:risk: {rr_err}")
+            else:
+                reward_risk_net = r_net
+                if r_net < min_rr_dec:
+                    _fail(
+                        _RULE_MIN_REWARD_RISK,
+                        f"reward_risk_net={_fmt_down(r_net, _RATIO_DISPLAY)} < "
+                        f"min={min_rr_dec} (after round-trip fee/spread/slippage costs)",
+                    )
+
+    # --- Max loss if the stop is hit, incl. costs (policy 1.1+; when present) ---
+    if active.get(_RULE_MAX_RISK_PER_TRADE) is not None:
+        risk_budget = _need_approved(_RULE_MAX_RISK_PER_TRADE)
+        if risk_budget is not None:
+            budget_dec = _try_decimal(risk_budget)
+            implied_loss, loss_err = _implied_stop_loss(proposal, context)
+            if budget_dec is None:
+                _fail(
+                    _RULE_MAX_RISK_PER_TRADE,
+                    f"approved budget is non-numeric ({risk_budget!r})",
+                )
+            elif loss_err is not None or implied_loss is None:
+                _fail(
+                    _RULE_MAX_RISK_PER_TRADE,
+                    f"cannot bound loss at stop: {loss_err}; {_STOP_NOT_GUARANTEED}",
+                )
+            elif implied_loss > budget_dec:
+                _fail(
+                    _RULE_MAX_RISK_PER_TRADE,
+                    f"implied loss at stop={_fmt_up(implied_loss, _USDT_DISPLAY)} USDT "
+                    f"> max={budget_dec} USDT; {_STOP_NOT_GUARANTEED}",
+                )
 
     # --- Order types / TIF ---
     order_types = _need_approved("RP-ORDER-TYPES-ALLOWED")
@@ -576,6 +686,17 @@ def evaluate_risk(
             if not any(r["rule_id"] == param_id for r in reasons):
                 _unapproved(param_id)
 
+    # Optional (1.1+) params: absent ⇒ not enforced; present but not APPROVED ⇒ REJECT.
+    for param_id in OPTIONAL_FINANCIAL_PARAM_IDS:
+        param = active.get(param_id)
+        if param is None:
+            continue
+        _mark(param_id)
+        if param.status != ParamStatus.APPROVED and not any(
+            r["rule_id"] == param_id for r in reasons
+        ):
+            _unapproved(param_id)
+
     if reasons:
         return _build_decision(
             RiskDecisionType.REJECT,
@@ -600,6 +721,8 @@ def evaluate_risk(
         )
 
     validated = _validated_params(proposal)
+    if reward_risk_net is not None:
+        validated["reward_risk_net"] = _fmt_down(reward_risk_net, _RATIO_DISPLAY)
     return _build_decision(
         RiskDecisionType.APPROVE,
         proposal,
@@ -671,6 +794,115 @@ def _try_decimal(value: Any) -> Decimal | None:
     except (InvalidOperation, ValueError, TypeError):
         return None
     return dec if dec.is_finite() else None
+
+
+def _fmt_down(value: Decimal, places: Decimal) -> str:
+    """Display helper: truncate (never round a failing ratio up to a passing one)."""
+    try:
+        return str(value.quantize(places, rounding=ROUND_DOWN))
+    except InvalidOperation:
+        return str(value)
+
+
+def _fmt_up(value: Decimal, places: Decimal) -> str:
+    """Display helper for losses: round away from zero (never understate a loss)."""
+    try:
+        return str(value.quantize(places, rounding=ROUND_UP))
+    except InvalidOperation:
+        return str(value)
+
+
+def _take_profit_required(value: Any) -> bool:
+    if value is True:
+        return True
+    return isinstance(value, str) and value.strip().lower() == TAKE_PROFIT_POLICY_REQUIRED
+
+
+def _round_trip_cost_per_unit(
+    entry: Decimal, context: RiskContext
+) -> tuple[Decimal | None, str | None]:
+    """Cost per unit of base asset for entry + exit, in quote currency.
+
+    ``Cu = entry * (2*fee_bps + spread_bps + 2*slippage_bps) / 10000``. All three
+    inputs are required (fail closed); negative inputs are rejected as invalid.
+    """
+    fee = _try_decimal(context.fee_estimate)
+    spread = _try_decimal(context.spread)
+    slippage = _try_decimal(context.slippage_model_bps)
+    if fee is None or spread is None or slippage is None:
+        missing = [
+            name
+            for name, value in (
+                ("fee_estimate", fee),
+                ("spread", spread),
+                ("slippage_model_bps", slippage),
+            )
+            if value is None
+        ]
+        return None, f"cost inputs missing or non-numeric: {', '.join(missing)}"
+    if fee < 0 or spread < 0 or slippage < 0:
+        return None, (
+            f"cost inputs must be >= 0 (fee_estimate={fee}, spread={spread}, "
+            f"slippage_model_bps={slippage})"
+        )
+    round_trip_bps = Decimal(2) * fee + spread + Decimal(2) * slippage
+    return entry * round_trip_bps / _BPS, None
+
+
+def _positive_entry(proposal: TradeProposal) -> tuple[Decimal | None, str | None]:
+    raw_entry = _entry_price(proposal)
+    if raw_entry is None:
+        return None, "entry_price missing"
+    entry = _try_decimal(raw_entry)
+    if entry is None:
+        return None, f"non-numeric entry_price={raw_entry!r}"
+    if entry <= 0:
+        return None, f"entry_price={entry} must be positive"
+    return entry, None
+
+
+def _net_reward_risk(
+    proposal: TradeProposal, context: RiskContext
+) -> tuple[Decimal | None, str | None]:
+    """``R_net = (|TP - entry| - Cu) / (|entry - SL| + Cu)``; missing input ⇒ error."""
+    entry, err = _positive_entry(proposal)
+    if entry is None:
+        return None, err
+    stop = _try_decimal(proposal.stop_loss)
+    if stop is None:
+        return None, "stop_loss missing or non-numeric"
+    target = _try_decimal(proposal.take_profit)
+    if target is None:
+        return None, "take_profit missing or non-numeric"
+    cost, cost_err = _round_trip_cost_per_unit(entry, context)
+    if cost is None:
+        return None, cost_err
+    risk = abs(entry - stop) + cost
+    if risk <= 0:
+        return None, "risk per unit is zero (stop_loss equals entry_price and no costs)"
+    reward = abs(target - entry) - cost
+    return reward / risk, None
+
+
+def _implied_stop_loss(
+    proposal: TradeProposal, context: RiskContext
+) -> tuple[Decimal | None, str | None]:
+    """Loss (quote) if the stop fills at its price: ``notional/entry * (|entry-SL| + Cu)``."""
+    entry, err = _positive_entry(proposal)
+    if entry is None:
+        return None, err
+    notional = _try_decimal(context.proposed_notional)
+    if notional is None:
+        return None, "proposed_notional missing or non-numeric"
+    if notional < 0:
+        return None, f"proposed_notional={notional} must be >= 0"
+    stop = _try_decimal(proposal.stop_loss)
+    if stop is None:
+        return None, "stop_loss missing or non-numeric"
+    cost, cost_err = _round_trip_cost_per_unit(entry, context)
+    if cost is None:
+        return None, cost_err
+    return notional / entry * (abs(entry - stop) + cost), None
 
 
 def _as_str_set(value: Any) -> set[str]:

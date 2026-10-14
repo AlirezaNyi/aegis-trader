@@ -37,5 +37,13 @@ class RiskContext:
     # structural RP-ENTRY-VS-BOOK rule; None ⇒ that rule fails closed.
     best_bid: Decimal | None = None
     best_ask: Decimal | None = None
+    # Equity loss (USDT, positive = loss) since the start of the current ISO week /
+    # calendar month (UTC). Required only when the policy carries
+    # RP-WEEKLY-LOSS-LIMIT / RP-MONTHLY-LOSS-LIMIT; None then ⇒ REJECT.
+    weekly_loss: Decimal | None = None
+    monthly_loss: Decimal | None = None
+    # Caller-set lock after a loss-limit breach. When set and now < value, every
+    # new trade is rejected (RP-PERIOD-LOCK). None ⇒ no lock in force.
+    period_lock_until: datetime | None = None
     account_state_refs: list[str] = field(default_factory=list)
     market_state_refs: list[str] = field(default_factory=list)
