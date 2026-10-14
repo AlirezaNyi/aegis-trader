@@ -16,6 +16,7 @@ from aegis.evidence.builder import build_evidence_package, empty_package_shell
 from aegis.features.engine import compute_features
 from aegis.interfaces.jev import JevPort
 from aegis.interfaces.llm import LlmPort
+from aegis.logging import get_logger
 from aegis.market_data.depth import spread_bps as compute_spread_bps
 from aegis.paper.broker import PaperBroker
 from aegis.paper.equity import (
@@ -25,9 +26,12 @@ from aegis.paper.equity import (
     instrument_mark_key,
 )
 from aegis.paper.exceptions import PaperBrokerError
+from aegis.paper.exits import ExitFill, apply_exits
+from aegis.paper.state_store import PaperStateStore
 from aegis.pipeline.activity import ActivityStage, ActivityState
 from aegis.pipeline.audit import DecisionAuditStore
 from aegis.pipeline.context import build_paper_risk_context
+from aegis.pipeline.decide import make_proposal
 from aegis.pipeline.defaults import proposal_defaults_from_policy
 from aegis.pipeline.intent import IntentBuildError, intent_from_approved
 from aegis.risk.engine import evaluate_risk
@@ -39,9 +43,12 @@ from aegis.schemas.market import Candle, InstrumentRef, OrderBookTop
 from aegis.schemas.orders import Order
 from aegis.schemas.proposal import TradeProposal
 from aegis.schemas.risk import RiskDecision, RiskDecisionType
+from aegis.strategy.rules import RuleParams
 from aegis.supervisor.budgets import BudgetConfig, DailyCallLimiter
-from aegis.supervisor.supervise import no_trade_proposal, supervise
+from aegis.supervisor.supervise import no_trade_proposal
 from aegis.validation.stage import ValidationResult, validate_candles
+
+logger = get_logger("aegis.pipeline.cycle")
 
 
 @dataclass(frozen=True)
@@ -63,6 +70,11 @@ class PaperCycleDeps:
     audit: DecisionAuditStore | None = None
     # Shared across cycles so the owner's daily LLM call cap is global.
     llm_call_limiter: DailyCallLimiter | None = None
+    # Persists paper ledger + period equity state; None = in-memory (tests/backtest).
+    state_store: PaperStateStore | None = None
+    # llm | rules | rules+llm (see pipeline/decide.py); rules need rule_params.
+    decision_source: str = "llm"
+    rule_params: RuleParams | None = None
 
 
 def _notify_activity(
@@ -95,6 +107,7 @@ class PaperCycleResult:
     decision: RiskDecision | None
     order: Order | None
     blocked_reason: str | None = None
+    exits: tuple[ExitFill, ...] = ()
 
 
 def stale_after_ms(policy: RiskPolicy) -> int:
@@ -104,11 +117,24 @@ def stale_after_ms(policy: RiskPolicy) -> int:
     return 5000
 
 
-def _daily_loss_limit(policy: RiskPolicy) -> Decimal | None:
-    param = policy.get("RP-DAILY-LOSS-LIMIT")
+def _approved_limit(policy: RiskPolicy, param_id: str) -> Decimal | None:
+    param = policy.get(param_id)
     if param is not None and param.status == ParamStatus.APPROVED and param.value is not None:
         return Decimal(str(param.value))
     return None
+
+
+def _daily_loss_limit(policy: RiskPolicy) -> Decimal | None:
+    return _approved_limit(policy, "RP-DAILY-LOSS-LIMIT")
+
+
+def _loss_limits(policy: RiskPolicy) -> dict[str, Decimal | None]:
+    """Approved period loss limits (USDT) passed to the equity tracker."""
+    return {
+        "daily_loss_limit": _approved_limit(policy, "RP-DAILY-LOSS-LIMIT"),
+        "weekly_loss_limit": _approved_limit(policy, "RP-WEEKLY-LOSS-LIMIT"),
+        "monthly_loss_limit": _approved_limit(policy, "RP-MONTHLY-LOSS-LIMIT"),
+    }
 
 
 def _reject_for_validation(
@@ -183,7 +209,7 @@ def _reject_for_validation(
     return proposal, decision
 
 
-async def run_paper_cycle(
+async def _run_paper_cycle_body(
     candles: Sequence[Candle],
     *,
     deps: PaperCycleDeps,
@@ -234,6 +260,26 @@ async def run_paper_cycle(
             blocked_reason="trading_mode_live",
         )
 
+    # Protective SL/TP exits run before any entry gate: they only reduce a paper
+    # position, so the kill switch / validation blocks do not stop them.
+    exits: tuple[ExitFill, ...] = ()
+    try:
+        exits = tuple(
+            apply_exits(
+                deps.paper_broker,
+                instrument,
+                [c for c in candles if c.is_final],
+                now=clock,
+            )
+        )
+    except PaperBrokerError as exc:
+        logger.warning(
+            "paper_exit_failed symbol=%s err=%s",
+            instrument.symbol,
+            type(exc).__name__,
+            extra={"event": "paper_exit_failed", "component": "cycle"},
+        )
+
     if deps.settings.kill_switch:
         empty = ValidationResult(
             ok=False,
@@ -244,6 +290,7 @@ async def run_paper_cycle(
             block_reasons=("kill_switch",),
         )
         return PaperCycleResult(
+            exits=exits,
             correlation_id=corr,
             validation=empty,
             proposal=None,
@@ -265,6 +312,7 @@ async def run_paper_cycle(
             block_reasons=("unsupported_trading_mode",),
         )
         return PaperCycleResult(
+            exits=exits,
             correlation_id=corr,
             validation=empty,
             proposal=None,
@@ -292,6 +340,7 @@ async def run_paper_cycle(
             strategy_version=deps.strategy_version,
         )
         return PaperCycleResult(
+            exits=exits,
             correlation_id=corr,
             validation=validation,
             proposal=proposal,
@@ -353,8 +402,8 @@ async def run_paper_cycle(
         timeframe=timeframe,
         correlation_id=corr,
     )
-    # Jev and LLM adapters use blocking httpx; keep them off the event loop.
-    jev_result = await asyncio.to_thread(deps.jev_port.evaluate, package)
+    # Jev and LLM adapters are async (httpx.AsyncClient): awaited directly.
+    jev_result = await deps.jev_port.evaluate(package)
     _notify_activity(
         deps,
         ActivityStage.SUPERVISOR,
@@ -362,17 +411,23 @@ async def run_paper_cycle(
         timeframe=timeframe,
         correlation_id=corr,
     )
-    proposal = await asyncio.to_thread(
-        supervise,
+    proposal = await make_proposal(
         package,
         jev_result,
-        deps.llm_port,
+        decision_source=deps.decision_source,
+        rule_params=deps.rule_params,
+        llm=deps.llm_port,
         budgets=deps.supervisor_budgets,
         timeout_seconds=deps.settings.supervisor_timeout_seconds,
         strategy_id=deps.strategy_id,
         strategy_version=deps.strategy_version,
         clock=lambda: clock,
-        defaults=proposal_defaults_from_policy(deps.risk_policy),
+        defaults=proposal_defaults_from_policy(
+            deps.risk_policy,
+            fee_bps=deps.settings.effective_fee_bps,
+            slippage_bps=Decimal(str(deps.settings.paper_slippage_bps)),
+            spread_bps=spread_bps,
+        ),
         call_limiter=deps.llm_call_limiter,
     )
     if deps.audit is not None:
@@ -395,14 +450,14 @@ async def run_paper_cycle(
         mark_price=mark,
         equity_tracker=deps.equity_tracker,
         proposal_history=deps.proposal_history,
-        daily_loss_limit=_daily_loss_limit(deps.risk_policy),
+        **_loss_limits(deps.risk_policy),
         # Real order-book spread in bps; None (unobserved) fails RP-MAX-SPREAD closed.
         spread=spread_bps,
         # Observed top of book; None => RP-ENTRY-VS-BOOK rejects (fail closed).
         best_bid=None if book_top is None else book_top.best_bid,
         best_ask=None if book_top is None else book_top.best_ask,
         slippage_model_bps=Decimal(str(deps.settings.paper_slippage_bps)),
-        fee_estimate=Decimal(str(deps.settings.paper_fee_bps)),
+        fee_estimate=deps.settings.effective_fee_bps,
     )
     decision = evaluate_risk(
         proposal,
@@ -437,7 +492,7 @@ async def run_paper_cycle(
                     marks={instrument_mark_key(instrument): mark},
                 ),
                 now=clock,
-                daily_loss_limit=_daily_loss_limit(deps.risk_policy),
+                **_loss_limits(deps.risk_policy),
             )
         except (IntentBuildError, PaperBrokerError, RiskHandoffDenied) as exc:
             # Fail closed: no paper fill. Decision remains for audit.
@@ -445,6 +500,7 @@ async def run_paper_cycle(
             fill_blocked = f"paper_fill_blocked:{type(exc).__name__}"
 
     return PaperCycleResult(
+        exits=exits,
         correlation_id=corr,
         validation=validation,
         proposal=proposal,
@@ -452,3 +508,43 @@ async def run_paper_cycle(
         order=order,
         blocked_reason=fill_blocked,
     )
+
+
+async def run_paper_cycle(
+    candles: Sequence[Candle],
+    *,
+    deps: PaperCycleDeps,
+    instrument: InstrumentRef,
+    timeframe: Timeframe,
+    now: datetime | None = None,
+    correlation_id: str | None = None,
+    spread_bps: Decimal | None = None,
+    book_top: OrderBookTop | None = None,
+) -> PaperCycleResult:
+    """Run one paper decision cycle, then persist paper ledger + period state.
+
+    Saving runs after every non-live cycle (including blocked ones) so period
+    locks survive restarts. Paper/development only; never calls OrderManager.
+    """
+    store = deps.state_store
+    if store is not None and store.enabled and (
+        not store.restored or deps.equity_tracker.state_lost
+    ):
+        # Restore before any decision; on failure the tracker reports None losses
+        # and Risk rejects new trades until a later retry succeeds.
+        await asyncio.to_thread(store.restore, deps.paper_broker.ledger, deps.equity_tracker)
+    result = await _run_paper_cycle_body(
+        candles,
+        deps=deps,
+        instrument=instrument,
+        timeframe=timeframe,
+        now=now,
+        correlation_id=correlation_id,
+        spread_bps=spread_bps,
+        book_top=book_top,
+    )
+    if deps.state_store is not None and deps.settings.trading_mode != TradingMode.LIVE:
+        await asyncio.to_thread(
+            deps.state_store.save, deps.paper_broker.ledger, deps.equity_tracker
+        )
+    return result

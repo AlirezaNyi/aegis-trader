@@ -31,7 +31,7 @@ from aegis.risk.owner_v1 import owner_approved_policy_v1  # noqa: E402
 from aegis.schemas.common import EvidenceStatus, LedgerKind, MarketType, Timeframe  # noqa: E402
 from aegis.schemas.evidence import JevResult  # noqa: E402
 from aegis.schemas.market import InstrumentRef  # noqa: E402
-from aegis.schemas.orders import OrderIntent  # noqa: E402
+from aegis.schemas.orders import OrderIntent, OrderSide  # noqa: E402
 from aegis.schemas.proposal import ProposalAction, TradeDirection, TradeProposal  # noqa: E402
 from aegis.schemas.risk import RiskDecisionType  # noqa: E402
 
@@ -154,7 +154,7 @@ def main() -> int:
         client_order_id=f"paper-demo-{uuid4().hex[:12]}",
         ledger_kind=LedgerKind.PAPER,
         instrument=proposal.instrument,
-        side="BUY",
+        side=OrderSide.BUY,
         order_type="LIMIT",
         quantity=_QTY,
         price=_ENTRY,

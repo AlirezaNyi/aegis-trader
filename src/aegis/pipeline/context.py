@@ -31,6 +31,8 @@ def build_paper_risk_context(
     equity_tracker: PaperEquityTracker | None = None,
     proposal_history: ProposalHistory | None = None,
     daily_loss_limit: Decimal | None = None,
+    weekly_loss_limit: Decimal | None = None,
+    monthly_loss_limit: Decimal | None = None,
     spread: Decimal | None = None,
     best_bid: Decimal | None = None,
     best_ask: Decimal | None = None,
@@ -68,7 +70,13 @@ def build_paper_risk_context(
     equity = compute_paper_equity(ledger, marks=marks or None)
 
     tracker = equity_tracker or PaperEquityTracker()
-    snap = tracker.observe(equity, now=now, daily_loss_limit=daily_loss_limit)
+    snap = tracker.observe(
+        equity,
+        now=now,
+        daily_loss_limit=daily_loss_limit,
+        weekly_loss_limit=weekly_loss_limit,
+        monthly_loss_limit=monthly_loss_limit,
+    )
 
     history = proposal_history or ProposalHistory()
     recent: list[UUID] = history.recent_ids
@@ -89,6 +97,10 @@ def build_paper_risk_context(
         proposed_notional=proposed,
         daily_loss=snap.daily_loss,
         drawdown=snap.drawdown,
+        # None when period state is unavailable/lost => Risk rejects (fail closed).
+        weekly_loss=snap.weekly_loss,
+        monthly_loss=snap.monthly_loss,
+        period_lock_until=snap.period_lock_until,
         spread=spread,
         best_bid=best_bid,
         best_ask=best_ask,

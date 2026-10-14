@@ -110,6 +110,37 @@ Do not auto-complete. Owner must review:
 * Review disk growth from candles and audit logs.
 * Avoid LLM on every market tick — event-driven analysis, caching, timeouts, budgets.
 
+### 8.1 Owner risk limits (policy 1.1, env)
+
+Select `AEGIS_RISK_POLICY_VERSION=1.1`. All values are **percent of the initial
+capital base** (`AEGIS_PAPER_INITIAL_BALANCE`; set it to the real account size
+before any live review). There are no code defaults: any empty required value makes
+every new trade REJECT, and the startup log plus `/ops/dashboard` (`risk_policy.
+missing_env`) list the missing names.
+
+| Env | Meaning | Practitioner convention (not a recommendation) |
+| --- | --- | --- |
+| `AEGIS_RISK_POSITION_PCT` | Max notional per position | sized so several positions fit the capital |
+| `AEGIS_RISK_PER_TRADE_PCT` | Loss if the stop is hit (sizes by stop distance) | commonly 0.5–2% |
+| `AEGIS_RISK_DAILY_LOSS_PCT` | Daily (UTC) equity loss before lock | below weekly |
+| `AEGIS_RISK_WEEKLY_LOSS_PCT` | ISO-week (Mon 00:00 UTC) loss before lock | between daily and monthly |
+| `AEGIS_RISK_MONTHLY_LOSS_PCT` | Calendar-month loss before lock | above weekly |
+| `AEGIS_RISK_MAX_DRAWDOWN_PCT` | Drawdown from peak equity | — |
+| `AEGIS_RISK_MIN_REWARD_RISK` | Min reward:risk **after** round-trip fees, spread, slippage | breakeven win rate = 1/(1+R) |
+| `AEGIS_TRADING_FEE_BPS` | Real Toobit fee per side (use taker; see toobit.com/vip) | — |
+
+Validation enforces 0 < pct ≤ 100, daily ≤ weekly ≤ monthly, and per-trade ≤ position.
+Losses are equity-based (realized + unrealized). Breaching a limit locks new entries
+until the next period starts; protective stop/target exits still run. Period state and
+the paper ledger persist in Postgres (`risk_period_state`); if they cannot be restored,
+new trades REJECT until the state is repaired (no silent reset).
+
+### 8.2 Decision source and rule parameters
+
+`AEGIS_DECISION_SOURCE=llm|rules|rules+llm`. `rules` needs no LLM spend; `rules+llm`
+lets the LLM only veto rule candidates. Rules need `AEGIS_RULE_PARAMS_FILE` (JSON from
+`scripts/walk_forward.py`); missing/invalid params => every cycle NO_TRADE.
+
 ## 9. Restart recovery
 
 1. Compose/`uvicorn` graceful shutdown marks shutting_down; `/ready` fails closed.

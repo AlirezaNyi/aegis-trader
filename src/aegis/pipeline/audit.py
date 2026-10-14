@@ -39,9 +39,14 @@ class DecisionAuditStore:
         try:
             engine = create_engine_from_url(url)
             self._session_factory = sessionmaker(bind=engine, expire_on_commit=False)
-        except Exception as exc:  # noqa: BLE001 — fail open
+        except Exception as exc:  # noqa: BLE001 — fail open; audit never blocks a cycle
             self.last_error = f"engine_init:{type(exc).__name__}"
             self._session_factory = None
+            logger.warning(
+                "decision_audit_engine_failed err=%s",
+                type(exc).__name__,
+                extra={"event": "decision_audit_engine_failed", "component": "audit"},
+            )
 
     @property
     def enabled(self) -> bool:

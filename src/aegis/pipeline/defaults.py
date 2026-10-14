@@ -11,7 +11,12 @@ from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 
-from aegis.risk.policy import ParamStatus, RiskPolicy
+from aegis.risk.policy import (
+    SIZING_METHOD_PCT_CAPITAL,
+    SIZING_METHOD_RISK_PCT_CAPITAL,
+    ParamStatus,
+    RiskPolicy,
+)
 from aegis.supervisor.decision import ProposalDefaults
 
 _FALLBACK_TTL = timedelta(minutes=5)
@@ -33,7 +38,29 @@ def _single_choice(value: Any) -> str | None:
     return None
 
 
-def proposal_defaults_from_policy(policy: RiskPolicy) -> ProposalDefaults:
+def _approved_decimal(policy: RiskPolicy, param_id: str) -> Decimal | None:
+    value = _approved_value(policy, param_id)
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except (ArithmeticError, ValueError):
+        return None
+
+
+def proposal_defaults_from_policy(
+    policy: RiskPolicy,
+    *,
+    fee_bps: Decimal | None = None,
+    slippage_bps: Decimal | None = None,
+    spread_bps: Decimal | None = None,
+) -> ProposalDefaults:
+    """Code-owned proposal fields from APPROVED policy values only.
+
+    ``fee_bps``/``slippage_bps``/``spread_bps`` describe the round-trip cost model
+    used for risk-based sizing and the prompt hint; the Risk Engine recomputes
+    costs from its own context. Missing inputs leave fields empty (fail closed).
+    """
     entry_conditions: dict[str, Any] = {}
     order_type = _single_choice(_approved_value(policy, "RP-ORDER-TYPES-ALLOWED"))
     if order_type is not None:
@@ -48,6 +75,13 @@ def proposal_defaults_from_policy(policy: RiskPolicy) -> ProposalDefaults:
         notional = _approved_value(policy, "RP-MAX-NOTIONAL-PER-ORDER")
         if notional is not None:
             sizing = {"method": "fixed_notional", "notional": str(notional)}
+    elif method in {SIZING_METHOD_PCT_CAPITAL, SIZING_METHOD_RISK_PCT_CAPITAL}:
+        # Notional is computed after the decision from the stop distance.
+        sizing = {"method": method}
+
+    cost_bps: Decimal | None = None
+    if fee_bps is not None and slippage_bps is not None and spread_bps is not None:
+        cost_bps = Decimal(2) * fee_bps + spread_bps + Decimal(2) * slippage_bps
 
     ttl = _FALLBACK_TTL
     ttl_ms = _approved_value(policy, "RP-PROPOSAL-TTL-MS")
@@ -69,4 +103,8 @@ def proposal_defaults_from_policy(policy: RiskPolicy) -> ProposalDefaults:
         sizing=sizing,
         ttl=ttl,
         max_stop_distance_pct=max_stop_pct,
+        position_cap_usdt=_approved_decimal(policy, "RP-MAX-NOTIONAL-PER-ORDER"),
+        risk_budget_usdt=_approved_decimal(policy, "RP-MAX-RISK-PER-TRADE"),
+        cost_bps_round_trip=cost_bps,
+        min_reward_risk=_approved_decimal(policy, "RP-MIN-REWARD-RISK"),
     )

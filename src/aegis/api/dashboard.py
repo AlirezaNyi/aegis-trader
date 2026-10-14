@@ -154,6 +154,12 @@ def dashboard_payload(request: Request) -> dict[str, Any]:
         "signal_aggregate": aggregate,
         "paper_account": paper_account,
         "persist_warning": persist_warning,
+        "risk_policy": {
+            "version": getattr(
+                getattr(request.app.state, "risk_policy", None), "policy_version", None
+            ),
+            "missing_env": list(getattr(request.app.state, "policy_missing_env", []) or []),
+        },
         "limitations": [
             "بازدهٔ درصدی سیگنال فرضی است؛ سایز سرمایه ساخته نمی‌شود.",
             "اگر پروسه چند کندل خاموش باشد، برخورد استاپ داخل شکاف دیده نمی‌شود.",

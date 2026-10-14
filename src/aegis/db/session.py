@@ -5,6 +5,10 @@ from __future__ import annotations
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
+from aegis.logging import get_logger
+
+logger = get_logger("aegis.db.session")
+
 
 def create_engine_from_url(database_url: str) -> Engine:
     return create_engine(database_url, pool_pre_ping=True)
@@ -18,6 +22,11 @@ def check_database(database_url: str, *, timeout_seconds: float = 2.0) -> tuple[
             conn.execute(text("SELECT 1"))
         engine.dispose()
     except Exception as exc:  # noqa: BLE001 — readiness must never crash the process
+        logger.warning(
+            "database_check_failed err=%s",
+            exc.__class__.__name__,
+            extra={"event": "database_check_failed", "component": "db"},
+        )
         return False, f"database unreachable: {exc.__class__.__name__}"
     _ = timeout_seconds
     return True, "database ok"

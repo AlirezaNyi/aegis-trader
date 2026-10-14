@@ -29,6 +29,7 @@ from aegis.market_data.rest_client import ToobitRestMarketDataClient  # noqa: E4
 from aegis.ops.shutdown import ShutdownGate  # noqa: E402
 from aegis.paper.broker import PaperBroker  # noqa: E402
 from aegis.pipeline.cycle import PaperCycleDeps  # noqa: E402
+from aegis.pipeline.decide import RuleParamsUnavailable, load_rule_params  # noqa: E402
 from aegis.pipeline.review import format_review_text, summarize_soak_outcome  # noqa: E402
 from aegis.pipeline.soak import (  # noqa: E402
     PaperSoakRunner,
@@ -37,6 +38,7 @@ from aegis.pipeline.soak import (  # noqa: E402
     soak_timeframe_from_settings,
 )
 from aegis.risk.factory import build_risk_policy_from_settings  # noqa: E402
+from aegis.strategy.rules import RuleParams  # noqa: E402
 from aegis.supervisor.factory import (  # noqa: E402
     budget_config_from_settings,
     build_call_limiter,
@@ -63,6 +65,16 @@ def _jev_line(outcome: object) -> str:
     )
 
 
+def _rule_params(settings: Settings) -> RuleParams | None:
+    if settings.decision_source == "llm":
+        return None
+    try:
+        return load_rule_params(settings.rule_params_file)
+    except RuleParamsUnavailable as exc:
+        print(f"rule params unavailable ({exc}); every cycle will be NO_TRADE")
+        return None
+
+
 async def _main(once: bool) -> int:
     clear_settings_cache()
     settings = Settings(
@@ -82,9 +94,12 @@ async def _main(once: bool) -> int:
         paper_broker=PaperBroker(
             settings_without_secrets(settings),
             initial_quote_balance=settings.paper_initial_balance,
+            fee_bps=settings.effective_fee_bps,
         ),
         analyst_concurrency=settings.analyst_concurrency,
         llm_call_limiter=build_call_limiter(settings),
+        decision_source=settings.decision_source,
+        rule_params=_rule_params(settings),
     )
     rest = ToobitRestMarketDataClient()
     try:
@@ -109,7 +124,7 @@ async def _main(once: bool) -> int:
             shutdown=gate,
         )
     finally:
-        rest.close()
+        await rest.aclose()
     return 0
 
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -32,7 +32,7 @@ _MAX_SOAK_SYMBOLS = 10
 
 
 class CandleFetcher(Protocol):
-    def get_candles(
+    async def get_candles(
         self,
         instrument: InstrumentRef,
         interval: Timeframe,
@@ -40,7 +40,7 @@ class CandleFetcher(Protocol):
         limit: int = 100,
         start_time: datetime | None = None,
         end_time: datetime | None = None,
-    ) -> list[Candle] | tuple[Candle, ...]:
+    ) -> Sequence[Candle]:
         """Return candles newest-last or unordered; runner sorts by open_time."""
 
 
@@ -162,7 +162,7 @@ class PaperSoakRunner:
         interval_ms = interval_to_milliseconds(self.timeframe.value)
         start_time = clock - timedelta(milliseconds=interval_ms * self.candle_limit)
         try:
-            raw = self.market_data.get_candles(
+            raw = await self.market_data.get_candles(
                 instrument,
                 self.timeframe,
                 limit=self.candle_limit,
@@ -228,7 +228,7 @@ class PaperSoakRunner:
                     extra={"event": "paper_soak_candle_store_failed", "component": "soak"},
                 )
 
-        book = self._fetch_book_top(
+        book = await self._fetch_book_top(
             instrument, max_age_ms=stale_after_ms(self.deps.risk_policy)
         )
         result = await run_paper_cycle(
@@ -259,7 +259,7 @@ class PaperSoakRunner:
             symbol=symbol,
         )
 
-    def _fetch_book_top(
+    async def _fetch_book_top(
         self, instrument: InstrumentRef, *, max_age_ms: int
     ) -> OrderBookTop | None:
         """Public order-book top; None when unavailable or stale (Risk then rejects)."""
@@ -267,7 +267,7 @@ class PaperSoakRunner:
         if getter is None:
             return None
         try:
-            top: OrderBookTop = getter(instrument)
+            top: OrderBookTop = await getter(instrument)
         except Exception as exc:  # noqa: BLE001 — missing book fails closed downstream
             logger.warning(
                 "paper_soak_depth_failed symbol=%s err=%s",

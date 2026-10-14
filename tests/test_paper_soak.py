@@ -68,7 +68,7 @@ class FakeMarketData:
         self.last_start_time: datetime | None = None
         self.last_limit: int | None = None
 
-    def get_candles(
+    async def get_candles(
         self,
         instrument: InstrumentRef,
         interval: Timeframe,
@@ -223,7 +223,7 @@ async def test_soak_multi_symbol_runs_each_new_bar() -> None:
             }
             self.calls = 0
 
-        def get_candles(
+        async def get_candles(
             self,
             instrument: InstrumentRef,
             interval: Timeframe,
@@ -311,7 +311,7 @@ class _BookMarketData:
     def __init__(self, top: object) -> None:
         self.top = top
 
-    def get_order_book_top(self, instrument: InstrumentRef) -> object:
+    async def get_order_book_top(self, instrument: InstrumentRef) -> object:
         _ = instrument
         if isinstance(self.top, Exception):
             raise self.top
@@ -346,12 +346,12 @@ def _top(*, exchange_age_ms: int | None) -> object:
         (RuntimeError("depth down"), False),
     ],
 )
-def test_soak_book_top_freshness_fails_closed(top: object, expect_book: bool) -> None:
+async def test_soak_book_top_freshness_fails_closed(top: object, expect_book: bool) -> None:
     runner = PaperSoakRunner(
         market_data=_BookMarketData(top),  # type: ignore[arg-type]
         deps=_deps(),
         instruments=(_instrument(),),
         timeframe=Timeframe.M1,
     )
-    book = runner._fetch_book_top(_instrument(), max_age_ms=5000)
+    book = await runner._fetch_book_top(_instrument(), max_age_ms=5000)
     assert (book is not None) is expect_book

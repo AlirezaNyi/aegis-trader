@@ -79,18 +79,15 @@ def mark_signal_on_candles(
         last_close = candle.close
         last_open = candle.open_time
         if direction == TradeDirection.LONG:
-            hit_stop = stop_loss is not None and candle.low <= stop_loss
-            hit_target = take_profit is not None and candle.high >= take_profit
-            if hit_stop:
-                assert stop_loss is not None
+            # Stop is checked first: a bar that touches both counts as stopped.
+            if stop_loss is not None and candle.low <= stop_loss:
                 return SignalMark(
                     status=SignalMarkStatus.STOPPED,
                     return_pct=compute_return_pct(entry_price, stop_loss, direction),
                     exit_price=stop_loss,
                     marked_open_time=candle.open_time,
                 )
-            if hit_target:
-                assert take_profit is not None
+            if take_profit is not None and candle.high >= take_profit:
                 return SignalMark(
                     status=SignalMarkStatus.TARGET,
                     return_pct=compute_return_pct(entry_price, take_profit, direction),
@@ -98,18 +95,14 @@ def mark_signal_on_candles(
                     marked_open_time=candle.open_time,
                 )
         else:
-            hit_stop = stop_loss is not None and candle.high >= stop_loss
-            hit_target = take_profit is not None and candle.low <= take_profit
-            if hit_stop:
-                assert stop_loss is not None
+            if stop_loss is not None and candle.high >= stop_loss:
                 return SignalMark(
                     status=SignalMarkStatus.STOPPED,
                     return_pct=compute_return_pct(entry_price, stop_loss, direction),
                     exit_price=stop_loss,
                     marked_open_time=candle.open_time,
                 )
-            if hit_target:
-                assert take_profit is not None
+            if take_profit is not None and candle.low <= take_profit:
                 return SignalMark(
                     status=SignalMarkStatus.TARGET,
                     return_pct=compute_return_pct(entry_price, take_profit, direction),

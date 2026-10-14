@@ -92,7 +92,7 @@ class CountingLlm:
         self.calls = 0
         self.response = response
 
-    def complete_structured(
+    async def complete_structured(
         self,
         *,
         prompt: str,
@@ -433,9 +433,11 @@ async def test_cycle_evidence_carries_market_context_and_spread() -> None:
     seen: dict[str, str] = {}
 
     class PromptSpy(CountingLlm):
-        def complete_structured(self, *, prompt: str, schema_name: str, timeout_seconds: float):  # type: ignore[override]
+        async def complete_structured(  # type: ignore[override]
+            self, *, prompt: str, schema_name: str, timeout_seconds: float
+        ):
             seen["prompt"] = prompt
-            return super().complete_structured(
+            return await super().complete_structured(
                 prompt=prompt, schema_name=schema_name, timeout_seconds=timeout_seconds
             )
 
@@ -486,3 +488,59 @@ async def test_cycle_buy_entry_above_observed_ask_is_rejected() -> None:
     rule_ids = {r["rule_id"] for r in result.decision.rejection_reasons}
     assert "RP-ENTRY-VS-BOOK" in rule_ids
     assert result.order is None
+
+
+@pytest.mark.asyncio
+async def test_cycle_stop_loss_exit_runs_even_under_kill_switch() -> None:
+    """Protective exits reduce risk, so the kill switch must not block them."""
+    import dataclasses
+
+    start = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
+    candles = _uptrend_series(45, start)
+    now = candles[-1].received_at + timedelta(milliseconds=100)
+    llm = CountingLlm(_compact_buy_payload(entry_price=str(candles[-1].close)))
+    budgets = BudgetConfig(
+        token_budget=2000,
+        cost_budget=Decimal("1.00"),
+        latency_budget_ms=5000,
+    )
+    deps = _deps(llm=llm, budgets=budgets)
+    first = await run_paper_cycle(
+        candles,
+        deps=deps,
+        instrument=_instrument(),
+        timeframe=Timeframe.M1,
+        now=now,
+        book_top=_book(candles[-1]),
+    )
+    assert first.order is not None
+    stop = first.proposal.stop_loss if first.proposal else None
+    assert stop is not None
+
+    last = candles[-1]
+    crash = last.model_copy(
+        update={
+            "open_time": last.open_time + timedelta(minutes=1),
+            "close_time": last.close_time + timedelta(minutes=1),
+            "open": last.close,
+            "high": last.close,
+            "low": stop - Decimal("1"),
+            "close": stop - Decimal("0.5"),
+            "received_at": last.close_time + timedelta(minutes=1, seconds=1),
+        }
+    )
+    killed = dataclasses.replace(deps, settings=_settings(kill_switch=True))
+    second = await run_paper_cycle(
+        [*candles, crash],
+        deps=killed,
+        instrument=_instrument(),
+        timeframe=Timeframe.M1,
+        now=crash.close_time + timedelta(seconds=2),
+    )
+    assert second.blocked_reason == "kill_switch"
+    assert len(second.exits) == 1
+    assert second.exits[0].exit_reason.value == "stop_loss"
+    held = deps.paper_broker.ledger.position_for(
+        "toobit", "spot", _instrument().symbol
+    )
+    assert held is None or held.quantity == 0

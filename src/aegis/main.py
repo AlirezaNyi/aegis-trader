@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI
 
@@ -13,6 +14,7 @@ from aegis.api.dashboard import router as dashboard_router
 from aegis.api.health import router as health_router
 from aegis.api.metrics import router as metrics_router
 from aegis.api.middleware import CorrelationIdMiddleware
+from aegis.config.legacy_env import LegacyEnvError, find_legacy_keys
 from aegis.config.runtime_public import (
     make_database_probe,
     runtime_public_from_settings,
@@ -30,10 +32,13 @@ from aegis.ops.metrics import OpsMetrics
 from aegis.ops.shutdown import ShutdownGate
 from aegis.orders.manager import OrderManager
 from aegis.paper.broker import PaperBroker
+from aegis.paper.equity import PaperEquityTracker
 from aegis.paper.ledger import PaperLedger
+from aegis.paper.state_store import PaperStateStore
 from aegis.pipeline.activity import ActivityState
 from aegis.pipeline.audit import DecisionAuditStore
 from aegis.pipeline.cycle import PaperCycleDeps, run_paper_cycle
+from aegis.pipeline.decide import RuleParamsUnavailable, load_rule_params
 from aegis.pipeline.journal import PaperCycleJournal
 from aegis.pipeline.soak import (
     PaperSoakRunner,
@@ -42,7 +47,8 @@ from aegis.pipeline.soak import (
     soak_timeframe_from_settings,
 )
 from aegis.reconcile.service import Reconciler
-from aegis.risk.factory import build_risk_policy_from_settings
+from aegis.risk.factory import build_risk_policy_from_settings, missing_policy_env
+from aegis.strategy.rules import RuleParams
 from aegis.supervisor.factory import (
     budget_config_from_settings,
     build_call_limiter,
@@ -59,10 +65,39 @@ def _should_start_paper_soak(settings: Settings) -> bool:
     )
 
 
+def _load_rule_params_or_none(settings: Settings, logger: Any) -> RuleParams | None:
+    """Rule params for rules modes; failure => None => every cycle NO_TRADE."""
+    if settings.decision_source == "llm":
+        return None
+    try:
+        return load_rule_params(settings.rule_params_file)
+    except RuleParamsUnavailable as exc:
+        logger.warning(
+            "rule_params_unavailable source=%s reason=%s (all cycles NO_TRADE)",
+            settings.decision_source,
+            str(exc),
+            extra={"event": "rule_params_unavailable", "component": "main"},
+        )
+        return None
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     resolved = settings or get_settings()
     configure_logging(resolved.log_level)
     logger = get_logger("aegis.main")
+    legacy_safety, legacy_other = find_legacy_keys(Settings.model_fields)
+    if legacy_safety:
+        # Refuse: e.g. KILL_SWITCH=true would be silently ignored (fail open).
+        raise LegacyEnvError(
+            "Unprefixed safety env keys are no longer read; rename to AEGIS_<NAME>: "
+            + ", ".join(legacy_safety)
+        )
+    if legacy_other:
+        logger.warning(
+            "legacy_env_keys_ignored keys=%s (rename to AEGIS_<NAME>)",
+            ",".join(legacy_other),
+            extra={"event": "legacy_env_keys_ignored", "component": "main"},
+        )
 
     ops_metrics = OpsMetrics()
     ops_metrics.set_kill_switch(resolved.kill_switch)
@@ -128,7 +163,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 except asyncio.CancelledError:
                     pass
             if rest_client is not None:
-                rest_client.close()
+                await rest_client.aclose()
+            # Release async HTTP clients held by credentialed ports (no-op stubs skip).
+            for port in (_app.state.jev_port, _app.state.llm_port):
+                closer = getattr(port, "aclose", None)
+                if closer is not None:
+                    await closer()
             logger.info(
                 "aegis_shutting_down",
                 extra={"event": "app_shutdown", "component": "main"},
@@ -157,6 +197,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.supervisor_budgets = budget_config_from_settings(resolved)
     # Risk policy from AEGIS_RISK_POLICY_VERSION (default owner v1.0). Does not arm live.
     app.state.risk_policy = build_risk_policy_from_settings(resolved)
+    # Env var NAMES only (never values) still missing for policy 1.1.
+    app.state.policy_missing_env = missing_policy_env(resolved)
+    if app.state.policy_missing_env:
+        logger.warning(
+            "risk_policy_incomplete version=%s missing=%s (new trades will be rejected)",
+            app.state.risk_policy.policy_version,
+            ",".join(app.state.policy_missing_env),
+            extra={"event": "risk_policy_incomplete", "component": "main"},
+        )
     safe_settings = settings_without_secrets(resolved)
     # Paper ledger — simulation only.
     paper_ledger = PaperLedger()
@@ -165,8 +214,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         settings=safe_settings,
         ledger=paper_ledger,
         initial_quote_balance=resolved.paper_initial_balance,
+        # Real owner-set fee when configured, so realized R matches Risk's cost model.
+        fee_bps=resolved.effective_fee_bps,
     )
     app.state.paper_broker = paper_broker
+    equity_tracker = PaperEquityTracker()
+    # Paper ledger + period loss state survive restarts when a DB is required
+    # (Compose). Restore happens lazily before the first cycle; failure => Risk rejects.
+    paper_state_store = (
+        PaperStateStore(resolved.database_url, quote_asset=paper_ledger.quote_asset)
+        if resolved.require_database
+        else None
+    )
+    app.state.paper_state_store = paper_state_store
+    app.state.equity_tracker = equity_tracker
     # Order Manager uses NullExecutionPort until owner arms live + wires build_execution_port.
     null_execution = NullExecutionPort()
     reconciler = Reconciler(null_execution)
@@ -197,6 +258,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         activity=activity,
         audit=decision_audit,
         llm_call_limiter=build_call_limiter(resolved),
+        equity_tracker=equity_tracker,
+        state_store=paper_state_store,
+        decision_source=resolved.decision_source,
+        rule_params=_load_rule_params_or_none(resolved, logger),
     )
     app.state.paper_cycle_deps = paper_cycle_deps
     app.state.run_paper_cycle = run_paper_cycle

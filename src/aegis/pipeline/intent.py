@@ -7,7 +7,7 @@ from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 
 from aegis.schemas.common import LedgerKind
-from aegis.schemas.orders import OrderIntent
+from aegis.schemas.orders import OrderIntent, OrderSide
 from aegis.schemas.proposal import ProposalAction, TradeProposal
 from aegis.schemas.risk import RiskDecision, RiskDecisionType
 
@@ -67,7 +67,7 @@ def intent_from_approved(
         client_order_id=f"paper-{uuid4().hex[:16]}",
         ledger_kind=LedgerKind.PAPER,
         instrument=proposal.instrument,
-        side=action.value,
+        side=OrderSide(action.value),
         order_type=order_type,
         quantity=quantity,
         price=entry_price,
