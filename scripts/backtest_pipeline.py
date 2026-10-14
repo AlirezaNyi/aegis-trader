@@ -8,11 +8,17 @@ replays each final bar through features -> analysts -> evidence -> Jev -> Superv
 Money/spread values are required arguments (no invented defaults). By default the
 LLM and Jev ports are Unavailable, so every bar is NO_TRADE (zero trades): this
 exercises validation/risk plumbing only. `--use-live-llm` calls the owner-configured
-LLM provider and requires `--max-llm-calls` (whole-run cap).
+LLM provider and requires `--max-llm-calls` (whole-run cap). `--decision-source rules`
+with `--rule-params-file` runs the deterministic rule strategy (no LLM/Jev). Research
+archive candles (e.g. `--exchange binance`) keep their exchange label; Risk's
+allowlist is by symbol and the report records `data_source`.
 
 Usage:
   .venv/bin/python scripts/backtest_pipeline.py --symbol ADAUSDT --interval 5m \\
       --days 7 --spread-bps 5 --initial-balance 100
+  .venv/bin/python scripts/backtest_pipeline.py --symbol ADAUSDT --interval 5m \\
+      --days 30 --exchange binance --decision-source rules \\
+      --rule-params-file data/walk_forward/best.json --spread-bps 5 --initial-balance 100
 """
 
 from __future__ import annotations
@@ -35,10 +41,12 @@ from aegis.config.settings import Settings, TradingMode, clear_settings_cache  #
 from aegis.interfaces.jev import UnavailableJevPort  # noqa: E402
 from aegis.interfaces.llm import LlmPort, UnavailableLlmPort  # noqa: E402
 from aegis.market_data.candle_store import CandleStore  # noqa: E402
+from aegis.pipeline.decide import RuleParamsUnavailable, load_rule_params  # noqa: E402
 from aegis.risk.factory import build_risk_policy_from_settings  # noqa: E402
 from aegis.schemas.backtest import SplitWindows, WindowMetrics  # noqa: E402
 from aegis.schemas.common import MarketType, Timeframe  # noqa: E402
 from aegis.schemas.market import InstrumentRef  # noqa: E402
+from aegis.strategy.rules import RuleParams  # noqa: E402
 from aegis.supervisor.factory import (  # noqa: E402
     budget_config_from_settings,
     build_llm_port,
@@ -90,7 +98,23 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="call the owner-configured LLM provider (costs money); needs --max-llm-calls",
     )
     parser.add_argument("--max-llm-calls", type=int, default=None)
+    parser.add_argument(
+        "--exchange", default="toobit", help="stored candle exchange label (e.g. binance)"
+    )
+    parser.add_argument(
+        "--data-source", default=None, help="report label, default '<exchange>-archive'"
+    )
+    parser.add_argument(
+        "--decision-source", default="llm", choices=["llm", "rules", "rules+llm"]
+    )
+    parser.add_argument(
+        "--rule-params-file", default=None, help="RuleParams JSON (rules / rules+llm)"
+    )
     args = parser.parse_args(argv)
+    if args.decision_source != "llm" and not args.rule_params_file:
+        parser.error("--decision-source rules/rules+llm requires --rule-params-file")
+    if args.decision_source == "rules+llm" and not args.use_live_llm:
+        parser.error("--decision-source rules+llm requires --use-live-llm")
     if args.days <= 0:
         parser.error("--days must be positive")
     if args.initial_balance <= 0:
@@ -144,7 +168,16 @@ async def _main(args: argparse.Namespace) -> int:
         print(f"candle store disabled ({store.last_error or 'no database url'})")
         return 2
 
-    instrument = InstrumentRef(market_type=MarketType(args.market_type), symbol=args.symbol)
+    instrument = InstrumentRef(
+        exchange=args.exchange, market_type=MarketType(args.market_type), symbol=args.symbol
+    )
+    rule_params: RuleParams | None = None
+    if args.decision_source != "llm":
+        try:
+            rule_params = load_rule_params(args.rule_params_file)
+        except RuleParamsUnavailable as exc:
+            print(f"rule params unavailable: {exc}")
+            return 2
     interval = Timeframe(args.interval)
     end = datetime.now(tz=UTC)
     start = end - timedelta(days=args.days)
@@ -181,9 +214,14 @@ async def _main(args: argparse.Namespace) -> int:
         initial_quote_balance=args.initial_balance,
         window_candles=args.window_candles,
         dataset_version=(
-            f"market_candles:{instrument.symbol}:{interval.value}:"
+            f"market_candles:{instrument.exchange}:{instrument.symbol}:{interval.value}:"
             f"{candles[0].open_time.isoformat()}..{candles[-1].open_time.isoformat()}"
         ),
+        decision_source=args.decision_source,
+        rule_params=rule_params,
+        data_source=None
+        if args.exchange == "toobit"
+        else (args.data_source or f"{args.exchange}-archive"),
     )
     print(f"candles={len(candles)} counters={report.assumptions.get('counters')}")
     if isinstance(llm_port, CappedLlmPort):

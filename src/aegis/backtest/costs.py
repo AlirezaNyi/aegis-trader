@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 
+from aegis.schemas.orders import OrderSide
+
 _BPS = Decimal("10000")
 _QUANT = Decimal("0.00000001")
 
@@ -17,17 +19,15 @@ class CostModel:
     slippage_bps: Decimal = Decimal("5")
     spread_bps: Decimal = Decimal("0")
 
-    def fill_price(self, mid: Decimal, *, side: str) -> Decimal:
+    def fill_price(self, mid: Decimal, *, side: OrderSide | str) -> Decimal:
         slip = (mid * self.slippage_bps / _BPS).quantize(_QUANT, rounding=ROUND_HALF_UP)
         half_spread = (mid * self.spread_bps / _BPS / Decimal("2")).quantize(
             _QUANT, rounding=ROUND_HALF_UP
         )
-        side_u = side.strip().upper()
-        if side_u == "BUY":
+        side_e = OrderSide.parse(side)  # ValueError on unknown sides
+        if side_e is OrderSide.BUY:
             return (mid + slip + half_spread).quantize(_QUANT, rounding=ROUND_HALF_UP)
-        if side_u == "SELL":
-            return (mid - slip - half_spread).quantize(_QUANT, rounding=ROUND_HALF_UP)
-        raise ValueError(f"unsupported side={side!r}")
+        return (mid - slip - half_spread).quantize(_QUANT, rounding=ROUND_HALF_UP)
 
     def fee(self, quantity: Decimal, price: Decimal) -> Decimal:
         notional = quantity * price

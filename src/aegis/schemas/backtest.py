@@ -40,6 +40,14 @@ class WindowMetrics(ApiModel):
     by_instrument: dict[str, dict[str, Any]] = Field(default_factory=dict)
     by_timeframe: dict[str, dict[str, Any]] = Field(default_factory=dict)
     sample_size_notes: str = ""
+    # R-multiple metrics over closed trades whose initial risk is defined (a stop
+    # below entry). avg_r = mean R; expectancy_r = sum(pnl) / sum(initial risk).
+    r_trade_count: int = 0
+    avg_r: Decimal | None = None
+    expectancy_r: Decimal | None = None
+    # Per-bar equity-return ratios: risk-free rate 0, NOT annualized.
+    sharpe_per_bar: Decimal | None = None
+    sortino_per_bar: Decimal | None = None
 
 
 class BacktestRunReport(ApiModel):

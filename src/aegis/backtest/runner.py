@@ -10,7 +10,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from aegis.backtest.costs import CostModel
-from aegis.backtest.metrics import compute_window_metrics
+from aegis.backtest.metrics import RTrade, compute_window_metrics
 from aegis.backtest.replay import CandleReplay
 from aegis.config.settings import Settings, TradingMode
 from aegis.paper.broker import PaperBroker
@@ -19,7 +19,7 @@ from aegis.risk.handoff import may_submit_to_order_manager
 from aegis.schemas.backtest import BacktestRunReport, SplitWindows, WindowMetrics
 from aegis.schemas.common import LedgerKind
 from aegis.schemas.market import Candle
-from aegis.schemas.orders import OrderIntent
+from aegis.schemas.orders import OrderIntent, OrderSide
 from aegis.schemas.risk import RiskDecision, RiskDecisionType
 
 SOFTWARE_VERSION = "aegis-0.1.0-phase6"
@@ -45,6 +45,7 @@ class _WindowAccumulator:
     by_timeframe: dict[str, dict[str, Any]] = field(default_factory=dict)
     open_entry: Decimal | None = None
     open_qty: Decimal = Decimal("0")
+    r_trades: list[RTrade] = field(default_factory=list)
 
 
 class BacktestRunner:
@@ -248,14 +249,16 @@ class BacktestRunner:
     ) -> RiskDecision | None:
         if skip_risk:
             return _auto_approve(intent, now, policy="backtest-skip-risk")
-        assert risk_gate is not None
+        if risk_gate is None:
+            # run() already refuses this combination; never auto-approve here.
+            raise ValueError("risk_gate is required unless skip_risk=True")
         return risk_gate(intent, candle)
 
     def _record_trade_pnl(
         self,
         acc: _WindowAccumulator,
         *,
-        side: str,
+        side: OrderSide,
         qty: Decimal,
         price: Decimal,
         fee: Decimal,
@@ -276,7 +279,7 @@ class BacktestRunner:
 def record_trade_pnl(
     acc: _WindowAccumulator,
     *,
-    side: str,
+    side: OrderSide,
     qty: Decimal,
     price: Decimal,
     fee: Decimal,
@@ -284,8 +287,7 @@ def record_trade_pnl(
     prior_entry: Decimal | None,
 ) -> None:
     """Average-cost long PnL accounting shared by candle and pipeline replays."""
-    side_u = side.strip().upper()
-    if side_u == "BUY":
+    if side is OrderSide.BUY:
         if prior_entry is None or prior_qty <= 0:
             acc.open_entry = price
             acc.open_qty = qty
@@ -294,7 +296,7 @@ def record_trade_pnl(
             acc.open_entry = ((prior_entry * prior_qty) + (price * qty)) / new_qty
             acc.open_qty = new_qty
         return
-    if side_u == "SELL" and prior_qty > 0 and prior_entry is not None:
+    if side is OrderSide.SELL and prior_qty > 0 and prior_entry is not None:
         close_qty = min(qty, prior_qty)
         gross = (price - prior_entry) * close_qty
         acc.trade_pnls.append(gross - fee)
@@ -308,7 +310,7 @@ def _auto_approve(intent: OrderIntent, now: datetime, *, policy: str) -> RiskDec
         decision=RiskDecisionType.APPROVE,
         policy_version=policy,
         rules_evaluated=[policy.upper()],
-        validated_order_params={"action": intent.side},
+        validated_order_params={"action": intent.side.value},
         decided_at=now,
         expires_at=datetime(2099, 1, 1, tzinfo=UTC),
         correlation_id=intent.risk_decision_correlation_id,
@@ -328,6 +330,7 @@ def _finalize(acc: _WindowAccumulator) -> WindowMetrics:
         total_bars=acc.total_bars,
         by_instrument=acc.by_instrument,
         by_timeframe=acc.by_timeframe,
+        r_trades=acc.r_trades,
     )
 
 
@@ -373,7 +376,7 @@ def buy_hold_one_bar_factory(*, quantity: Decimal = Decimal("1")) -> StrategyHoo
                 client_order_id=f"bt-sell-{now.isoformat()}",
                 ledger_kind=LedgerKind.PAPER,
                 instrument=candle.instrument,
-                side="SELL",
+                side=OrderSide.SELL,
                 order_type="MARKET",
                 quantity=quantity,
                 price=None,
@@ -387,7 +390,7 @@ def buy_hold_one_bar_factory(*, quantity: Decimal = Decimal("1")) -> StrategyHoo
             client_order_id=f"bt-buy-{now.isoformat()}",
             ledger_kind=LedgerKind.PAPER,
             instrument=candle.instrument,
-            side="BUY",
+            side=OrderSide.BUY,
             order_type="MARKET",
             quantity=quantity,
             price=None,

@@ -97,7 +97,7 @@ class ScriptedLlmPort:
         self.calls = 0
         self.prompts: list[str] = []
 
-    def complete_structured(
+    async def complete_structured(
         self, *, prompt: str, schema_name: str, timeout_seconds: float
     ) -> dict[str, Any]:
         _ = schema_name, timeout_seconds
@@ -122,9 +122,9 @@ class SpyJev:
     def __init__(self) -> None:
         self.as_of: list[datetime] = []
 
-    def evaluate(self, package: EvidencePackage) -> JevResult:
+    async def evaluate(self, package: EvidencePackage) -> JevResult:
         self.as_of.append(package.as_of)
-        return UnavailableJevPort().evaluate(package)
+        return await UnavailableJevPort().evaluate(package)
 
 
 class CycleSpy:
@@ -293,14 +293,111 @@ async def test_fills_are_paper_ledger_only() -> None:
     assert seen_kinds == {LedgerKind.PAPER}
 
 
-def test_capped_llm_port_limits_total_calls() -> None:
+async def test_capped_llm_port_limits_total_calls() -> None:
     llm = ScriptedLlmPort()
     llm.entry_price = Decimal("1")
     capped = CappedLlmPort(llm, max_calls=2)
     for _ in range(2):
-        capped.complete_structured(prompt="p", schema_name="s", timeout_seconds=1.0)
+        await capped.complete_structured(prompt="p", schema_name="s", timeout_seconds=1.0)
     with pytest.raises(LlmCallCapExceeded):
-        capped.complete_structured(prompt="p", schema_name="s", timeout_seconds=1.0)
+        await capped.complete_structured(prompt="p", schema_name="s", timeout_seconds=1.0)
     assert llm.calls == 2
     with pytest.raises(ValueError):
         CappedLlmPort(llm, max_calls=0)
+
+
+def _ramp_then_gap_candles(*, gap_price: Decimal | None) -> list[Candle]:
+    """Per 60-bar window: flat 100, ramp +3/bar, then (optionally) gap down and stay."""
+    out: list[Candle] = []
+    for i in range(N_BARS):
+        j = i % 60
+        if j < 30:
+            price = Decimal("100")
+        elif j < 40 or gap_price is None:
+            price = Decimal("100") + Decimal(min(j, 59) - 30) * Decimal("3")
+        else:
+            price = gap_price
+        open_time = START + timedelta(minutes=i)
+        out.append(
+            Candle(
+                instrument=_instrument(),
+                interval=Timeframe.M1,
+                open_time=open_time,
+                close_time=open_time + timedelta(minutes=1) - timedelta(milliseconds=1),
+                open=price,
+                high=price + Decimal("1"),
+                low=price - Decimal("1"),
+                close=price,
+                volume=Decimal("100"),
+                is_final=True,
+                source="fixture",
+                received_at=open_time + timedelta(days=3),
+            )
+        )
+    return out
+
+
+class ScriptedTargetLlmPort(ScriptedLlmPort):
+    """BUY with stop 3% below and target 1% above the bar close."""
+
+    async def complete_structured(
+        self, *, prompt: str, schema_name: str, timeout_seconds: float
+    ) -> dict[str, Any]:
+        out = await super().complete_structured(
+            prompt=prompt, schema_name=schema_name, timeout_seconds=timeout_seconds
+        )
+        assert self.entry_price is not None
+        out["take_profit"] = str(self.entry_price * Decimal("1.01"))
+        return out
+
+
+@pytest.mark.asyncio
+async def test_gap_through_stop_is_realized_with_r_metrics() -> None:
+    llm = ScriptedLlmPort()
+    report = await _replay(
+        llm=llm, spy=CycleSpy(llm), candles=_ramp_then_gap_candles(gap_price=Decimal("80"))
+    )
+    counters = report.assumptions["counters"]
+    assert int(counters["closed_stop_loss"]) >= 1
+    assert int(counters["exit_fills"]) == int(counters["closed_stop_loss"])
+    assert "exit_model" in report.assumptions
+    for m in (report.train_metrics, report.validation_metrics, report.oos_metrics):
+        assert m.trade_count >= 1
+        assert m.r_trade_count >= 1
+        assert m.avg_r is not None and m.avg_r < -1  # gap fills worse than the stop
+        assert m.expectancy_r is not None and m.expectancy_r < 0
+        assert m.sharpe_per_bar is not None and m.sortino_per_bar is not None
+
+
+@pytest.mark.asyncio
+async def test_take_profit_is_realized_on_ramp() -> None:
+    llm = ScriptedTargetLlmPort()
+    report = await _replay(
+        llm=llm, spy=CycleSpy(llm), candles=_ramp_then_gap_candles(gap_price=None)
+    )
+    counters = report.assumptions["counters"]
+    assert int(counters["closed_take_profit"]) >= 1
+    assert counters["closed_stop_loss"] == "0"
+    m = report.train_metrics
+    assert m.avg_r is not None and m.avg_r > 0
+    assert m.win_rate is not None and m.win_rate > 0
+
+
+@pytest.mark.asyncio
+async def test_exits_are_idempotent_when_cycle_also_applies_them() -> None:
+    """Parent may also call apply_exits inside run_paper_cycle: no double exit."""
+    from aegis.paper.exits import apply_exits
+
+    llm = ScriptedLlmPort()
+
+    class ExitingSpy(CycleSpy):
+        async def __call__(self, candles: Sequence[Candle], **kw: Any) -> PaperCycleResult:
+            deps = kw["deps"]
+            apply_exits(deps.paper_broker, kw["instrument"], candles, now=kw["now"])
+            return await super().__call__(candles, **kw)
+
+    report = await _replay(
+        llm=llm, spy=ExitingSpy(llm), candles=_ramp_then_gap_candles(gap_price=Decimal("80"))
+    )
+    counters = report.assumptions["counters"]
+    assert counters["exit_fills"] == counters["closed_stop_loss"] == "3"
