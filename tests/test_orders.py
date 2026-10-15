@@ -77,7 +77,20 @@ def _decision(
         rejection_reasons=(
             [{"rule_id": "TEST", "detail": "reject"}] if kind == RiskDecisionType.REJECT else []
         ),
-        validated_order_params={"action": "BUY"} if kind == RiskDecisionType.APPROVE else None,
+        validated_order_params=(
+            {
+                "action": "BUY",
+                "instrument": {
+                    "exchange": "toobit",
+                    "market_type": "spot",
+                    "symbol": "ETHUSDT",
+                },
+                "entry_conditions": {"entry_price": "100", "order_type": "LIMIT"},
+                "sizing": {"entry_price": "100", "notional": "100"},
+            }
+            if kind == RiskDecisionType.APPROVE
+            else None
+        ),
         decided_at=now,
         expires_at=expires_at or (now + timedelta(hours=1)),
         correlation_id=correlation_id,
@@ -89,7 +102,16 @@ def _paired() -> tuple[RiskDecision, OrderIntent]:
     proposal_id = uuid4()
     intent = _intent(proposal_id=proposal_id)
     decision = _decision(RiskDecisionType.APPROVE, proposal_id=proposal_id)
-    return decision, intent
+    price = intent.price
+    if price is None:
+        raise AssertionError("live test intent requires a price")
+    params = {
+        "action": intent.side.value,
+        "instrument": intent.instrument.model_dump(mode="json"),
+        "entry_conditions": {"entry_price": str(price), "order_type": intent.order_type},
+        "sizing": {"entry_price": str(price), "notional": str(price * intent.quantity)},
+    }
+    return decision.model_copy(update={"validated_order_params": params}), intent
 
 
 class SpyAdapter:

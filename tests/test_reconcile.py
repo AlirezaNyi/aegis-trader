@@ -54,7 +54,16 @@ def _approve(intent: OrderIntent) -> RiskDecision:
         expires_at=now + timedelta(hours=1),
         correlation_id=intent.risk_decision_correlation_id,
         proposal_id=intent.proposal_id,
-        validated_order_params={"action": "BUY"},
+        validated_order_params={
+            "action": "BUY",
+            "instrument": {
+                "exchange": "toobit",
+                "market_type": "spot",
+                "symbol": "ETHUSDT",
+            },
+            "entry_conditions": {"entry_price": "100", "order_type": "LIMIT"},
+            "sizing": {"entry_price": "100", "notional": "100"},
+        },
     )
 
 

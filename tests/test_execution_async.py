@@ -87,7 +87,16 @@ def _decision(proposal_id: Any) -> RiskDecision:
         decision=RiskDecisionType.APPROVE,
         policy_version="test",
         rules_evaluated=["TEST"],
-        validated_order_params={"action": "BUY"},
+        validated_order_params={
+            "action": "BUY",
+            "instrument": {
+                "exchange": "toobit",
+                "market_type": "spot",
+                "symbol": "ETHUSDT",
+            },
+            "entry_conditions": {"entry_price": "100", "order_type": "LIMIT"},
+            "sizing": {"entry_price": "100", "notional": "100"},
+        },
         decided_at=NOW,
         expires_at=NOW + timedelta(hours=1),
         correlation_id="corr-async",
@@ -567,7 +576,21 @@ async def test_order_manager_marks_side_conflict_rejected_without_block() -> Non
         side="BUY",
         extras={"side": "SELL"},
     )
-    order = await mgr.submit(_decision(pid), intent, now=NOW)
+    futures_decision = _decision(pid).model_copy(
+        update={
+            "validated_order_params": {
+                "action": "BUY",
+                "instrument": {
+                    "exchange": "toobit",
+                    "market_type": "futures",
+                    "symbol": "BTC-SWAP-USDT",
+                },
+                "entry_conditions": {"entry_price": "100", "order_type": "LIMIT"},
+                "sizing": {"entry_price": "100", "notional": "100"},
+            }
+        }
+    )
+    order = await mgr.submit(futures_decision, intent, now=NOW)
     assert order.status == OrderStatus.REJECTED
     assert order.side is OrderSide.BUY
     assert mgr.block_new_submits is False

@@ -497,7 +497,20 @@ def _decision(proposal_id: Any, kind: RiskDecisionType = RiskDecisionType.APPROV
         rejection_reasons=(
             [{"rule_id": "TEST", "detail": "r"}] if kind == RiskDecisionType.REJECT else []
         ),
-        validated_order_params={"action": "BUY"} if kind == RiskDecisionType.APPROVE else None,
+        validated_order_params=(
+            {
+                "action": "BUY",
+                "instrument": {
+                    "exchange": "toobit",
+                    "market_type": "spot",
+                    "symbol": "ETHUSDT",
+                },
+                "entry_conditions": {"entry_price": "100", "order_type": "LIMIT"},
+                "sizing": {"entry_price": "100", "notional": "100"},
+            }
+            if kind == RiskDecisionType.APPROVE
+            else None
+        ),
         decided_at=NOW,
         expires_at=NOW + timedelta(hours=1),
         correlation_id="corr-live",

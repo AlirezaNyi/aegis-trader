@@ -24,7 +24,11 @@ from aegis.orders.idempotency import (
     blocks_resubmit,
     is_terminal,
 )
-from aegis.risk.handoff import assert_may_submit_to_order_manager
+from aegis.risk.handoff import (
+    IntentBindingError,
+    assert_intent_matches_decision,
+    assert_may_submit_to_order_manager,
+)
 from aegis.schemas.common import LedgerKind
 from aegis.schemas.orders import Order, OrderIntent, OrderStatus
 from aegis.schemas.risk import RiskDecision
@@ -451,15 +455,10 @@ class OrderManager:
     def _assert_decision_binds_intent(
         self, decision: RiskDecision, intent: OrderIntent
     ) -> None:
-        if decision.proposal_id != intent.proposal_id:
-            raise OrderBindError(
-                "RiskDecision.proposal_id does not match OrderIntent.proposal_id"
-            )
-        if decision.correlation_id != intent.risk_decision_correlation_id:
-            raise OrderBindError(
-                "RiskDecision.correlation_id does not match "
-                "OrderIntent.risk_decision_correlation_id"
-            )
+        try:
+            assert_intent_matches_decision(decision, intent)
+        except IntentBindingError as exc:
+            raise OrderBindError(str(exc)) from exc
 
     def _assert_live_path_allowed(self, intent: OrderIntent) -> None:
         if intent.ledger_kind != LedgerKind.LIVE:
