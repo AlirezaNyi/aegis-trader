@@ -24,6 +24,12 @@ Restrictions (fail closed with ``PipelineReplayError``):
 * the Jev port is evaluated once per bar and the same result is shared by all
   parameter states (equivalent only for deterministic Jev ports, e.g.
   ``UnavailableJevPort``, the only port used by the tuner).
+
+Parameter sets may be rules-v1 (``RuleParams``) or rules-v2 (``RuleParamsV2``);
+a grid must not mix them. ``htf_candles`` (e.g. daily bars for rules-v2) are
+indexed once and each bar gets the trailing bars closed by its ``close_time``
+(same slice ``replay_windows`` passes to ``run_paper_cycle``). Analysts run with
+``backtest_settings`` (effectively no per-call timeout; load-independent).
 """
 
 from __future__ import annotations
@@ -34,6 +40,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from aegis.analysts.runner import run_analysts
+from aegis.backtest.htf import HtfIndex, backtest_settings
 from aegis.backtest.pipeline_replay import (
     CYCLE_CLOCK_OFFSET,
     PipelineReplayError,
@@ -65,7 +72,7 @@ from aegis.paper.exits import apply_exits
 from aegis.paper.ledger import PaperLedger
 from aegis.pipeline.context import build_paper_risk_context
 from aegis.pipeline.cycle import PaperCycleDeps, _loss_limits, stale_after_ms
-from aegis.pipeline.decide import make_proposal
+from aegis.pipeline.decide import AnyRuleParams, make_proposal
 from aegis.pipeline.defaults import proposal_defaults_from_policy
 from aegis.pipeline.intent import IntentBuildError, intent_from_approved
 from aegis.risk.engine import evaluate_risk
@@ -75,7 +82,6 @@ from aegis.schemas.common import Timeframe
 from aegis.schemas.market import Candle, InstrumentRef
 from aegis.schemas.proposal import ProposalAction
 from aegis.schemas.risk import RiskDecisionType
-from aegis.strategy.rules import RuleParams
 from aegis.validation.stage import validate_candles
 
 RULES_SOURCE = "rules"
@@ -92,7 +98,7 @@ def _fixed_clock(value: datetime) -> Callable[[], datetime]:
 class ParamOutcome:
     """Outcome of one parameter set over one window."""
 
-    params: RuleParams
+    params: AnyRuleParams
     window: WindowOutcome
     counters: dict[str, int]
     # First Risk rejection rule_id for rule BUY candidates (diagnostic only).
@@ -101,7 +107,7 @@ class ParamOutcome:
 
 @dataclass
 class _State:
-    params: RuleParams
+    params: AnyRuleParams
     deps: PaperCycleDeps
     acc: _WindowAccumulator
     counters: dict[str, int]
@@ -110,7 +116,7 @@ class _State:
 
 
 def _new_state(
-    params: RuleParams,
+    params: AnyRuleParams,
     *,
     settings: Settings,
     risk_policy: RiskPolicy,
@@ -160,7 +166,7 @@ async def replay_rules_multi(
     instrument: InstrumentRef,
     timeframe: Timeframe,
     window: ReplayWindow,
-    param_sets: Sequence[RuleParams],
+    param_sets: Sequence[AnyRuleParams],
     jev_port: JevPort,
     spread_bps: Decimal | None,
     initial_quote_balance: Decimal,
@@ -168,6 +174,7 @@ async def replay_rules_multi(
     strategy_id: str = "aegis-default",
     strategy_version: str = "0.1.0",
     analyst_concurrency: int = 5,
+    htf_candles: Sequence[Candle] | None = None,
 ) -> list[ParamOutcome]:
     """Replay one window once, evaluating every parameter set in lockstep.
 
@@ -177,6 +184,9 @@ async def replay_rules_multi(
     """
     if not param_sets:
         raise PipelineReplayError("param_sets must not be empty")
+    if len({type(p) for p in param_sets}) != 1:
+        raise PipelineReplayError("param_sets must not mix strategy versions")
+    settings = backtest_settings(settings)
     _check_replay_preconditions(
         settings,
         window_candles=window_candles,
@@ -213,6 +223,7 @@ async def replay_rules_multi(
         and c.interval == timeframe
     ]
     replayed = [as_replayed(c) for c in finals]
+    htf_index = None if htf_candles is None else HtfIndex(htf_candles, instrument=instrument)
     stale_ms = stale_after_ms(risk_policy)
     loss_limits = _loss_limits(risk_policy)
     slippage = Decimal(str(settings.paper_slippage_bps))
@@ -276,6 +287,7 @@ async def replay_rules_multi(
                 created_at=clock,
                 candles=validation.candles,
                 spread_bps=spread_bps,
+                htf_candles=None if htf_index is None else htf_index.visible(bar.close_time),
             )
             jev_result = await jev_port.evaluate(package)
         defaults = proposal_defaults_from_policy(

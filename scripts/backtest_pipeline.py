@@ -11,7 +11,9 @@ exercises validation/risk plumbing only. `--use-live-llm` calls the owner-config
 LLM provider and requires `--max-llm-calls` (whole-run cap). `--decision-source rules`
 with `--rule-params-file` runs the deterministic rule strategy (no LLM/Jev). Research
 archive candles (e.g. `--exchange binance`) keep their exchange label; Risk's
-allowlist is by symbol and the report records `data_source`.
+allowlist is by symbol and the report records `data_source`. rules-v2 params
+(`"strategy": "rules-v2"`) also load daily candles (`--htf-interval`, default 1d)
+for the regime filter; each bar sees only daily bars closed by its close time.
 
 Usage:
   .venv/bin/python scripts/backtest_pipeline.py --symbol ADAUSDT --interval 5m \\
@@ -41,12 +43,16 @@ from aegis.config.settings import Settings, TradingMode, clear_settings_cache  #
 from aegis.interfaces.jev import UnavailableJevPort  # noqa: E402
 from aegis.interfaces.llm import LlmPort, UnavailableLlmPort  # noqa: E402
 from aegis.market_data.candle_store import CandleStore  # noqa: E402
-from aegis.pipeline.decide import RuleParamsUnavailable, load_rule_params  # noqa: E402
+from aegis.pipeline.decide import (  # noqa: E402
+    AnyRuleParams,
+    RuleParamsUnavailable,
+    load_rule_params,
+)
 from aegis.risk.factory import build_risk_policy_from_settings  # noqa: E402
 from aegis.schemas.backtest import SplitWindows, WindowMetrics  # noqa: E402
 from aegis.schemas.common import MarketType, Timeframe  # noqa: E402
-from aegis.schemas.market import InstrumentRef  # noqa: E402
-from aegis.strategy.rules import RuleParams  # noqa: E402
+from aegis.schemas.market import Candle, InstrumentRef  # noqa: E402
+from aegis.strategy import RuleParamsV2  # noqa: E402
 from aegis.supervisor.factory import (  # noqa: E402
     budget_config_from_settings,
     build_llm_port,
@@ -110,6 +116,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--rule-params-file", default=None, help="RuleParams JSON (rules / rules+llm)"
     )
+    parser.add_argument(
+        "--htf-interval", default=Timeframe.D1.value, choices=[t.value for t in Timeframe],
+        help="higher-timeframe candles for rules-v2 (default 1d)",
+    )
+    parser.add_argument(
+        "--htf-warmup-days", type=int, default=320,
+        help="days of higher-timeframe history loaded before the replay start",
+    )
     args = parser.parse_args(argv)
     if args.decision_source != "llm" and not args.rule_params_file:
         parser.error("--decision-source rules/rules+llm requires --rule-params-file")
@@ -171,7 +185,7 @@ async def _main(args: argparse.Namespace) -> int:
     instrument = InstrumentRef(
         exchange=args.exchange, market_type=MarketType(args.market_type), symbol=args.symbol
     )
-    rule_params: RuleParams | None = None
+    rule_params: AnyRuleParams | None = None
     if args.decision_source != "llm":
         try:
             rule_params = load_rule_params(args.rule_params_file)
@@ -188,6 +202,19 @@ async def _main(args: argparse.Namespace) -> int:
     if not candles:
         print("no stored candles for range; run scripts/backfill_candles.py first")
         return 1
+
+    htf_candles: list[Candle] | None = None
+    if isinstance(rule_params, RuleParamsV2):
+        htf_candles = store.load_range(
+            instrument,
+            Timeframe(args.htf_interval),
+            start - timedelta(days=args.htf_warmup_days),
+            end,
+        )
+        if store.last_error or not htf_candles:
+            print(f"no higher-timeframe candles ({store.last_error or 'empty'}); "
+                  "rules-v2 needs them")
+            return 1
 
     llm_port: LlmPort = UnavailableLlmPort()
     if args.use_live_llm:
@@ -219,6 +246,7 @@ async def _main(args: argparse.Namespace) -> int:
         ),
         decision_source=args.decision_source,
         rule_params=rule_params,
+        htf_candles=htf_candles,
         data_source=None
         if args.exchange == "toobit"
         else (args.data_source or f"{args.exchange}-archive"),

@@ -248,7 +248,12 @@ class BacktestRunner:
         now: datetime,
     ) -> RiskDecision | None:
         if skip_risk:
-            return _auto_approve(intent, now, policy="backtest-skip-risk")
+            return _auto_approve(
+                intent,
+                now,
+                entry_price=candle.close,
+                policy="backtest-skip-risk",
+            )
         if risk_gate is None:
             # run() already refuses this combination; never auto-approve here.
             raise ValueError("risk_gate is required unless skip_risk=True")
@@ -305,12 +310,30 @@ def record_trade_pnl(
             acc.open_entry = None
 
 
-def _auto_approve(intent: OrderIntent, now: datetime, *, policy: str) -> RiskDecision:
+def _auto_approve(
+    intent: OrderIntent,
+    now: datetime,
+    *,
+    entry_price: Decimal,
+    policy: str,
+) -> RiskDecision:
+    effective_price = intent.price or entry_price
     return RiskDecision(
         decision=RiskDecisionType.APPROVE,
         policy_version=policy,
         rules_evaluated=[policy.upper()],
-        validated_order_params={"action": intent.side.value},
+        validated_order_params={
+            "instrument": intent.instrument.model_dump(mode="json"),
+            "action": intent.side.value,
+            "entry_conditions": {
+                "entry_price": str(effective_price),
+                "order_type": intent.order_type,
+            },
+            "sizing": {
+                "entry_price": str(effective_price),
+                "notional": str(effective_price * intent.quantity),
+            },
+        },
         decided_at=now,
         expires_at=datetime(2099, 1, 1, tzinfo=UTC),
         correlation_id=intent.risk_decision_correlation_id,

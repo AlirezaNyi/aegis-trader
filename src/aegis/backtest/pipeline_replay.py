@@ -23,6 +23,15 @@ visible final bars after entry for the Risk-approved stop-loss / take-profit
 (stop first when both are inside one bar). It is idempotent, so a cycle that also
 calls it on the same bars is a no-op. Trade PnL comes from the ledger's closed-trade
 log (net of entry and exit fees) and R-multiples use ``(entry - stop) * qty``.
+A rules-v2 time stop (``max_hold_bars`` in the approved ``entry_conditions``)
+closes at the close of the N-th bar after entry when neither level was hit.
+
+Higher timeframe: ``htf_candles`` (e.g. daily bars for rules-v2's regime filter)
+are indexed once; each cycle receives only the trailing bars with
+``close_time <= bar.close_time`` (``aegis.backtest.htf.HtfIndex``).
+
+Determinism: replay paths run analysts with ``backtest_settings`` (effectively no
+per-call timeout), so CPU load cannot change evidence between runs.
 """
 
 from __future__ import annotations
@@ -35,6 +44,12 @@ from decimal import Decimal
 from typing import Any, Protocol
 from uuid import UUID, uuid4
 
+from aegis.backtest.htf import (
+    BACKTEST_ANALYST_TIMEOUT_SECONDS,
+    HTF_CONTEXT_BARS,
+    HtfIndex,
+    backtest_settings,
+)
 from aegis.backtest.metrics import RTrade
 from aegis.backtest.runner import (
     _bump_breakdown,
@@ -51,13 +66,12 @@ from aegis.paper.exits import apply_exits
 from aegis.paper.ledger import PaperLedger
 from aegis.paper.protection import ExitReason
 from aegis.pipeline.cycle import PaperCycleDeps, PaperCycleResult, run_paper_cycle
-from aegis.pipeline.decide import DECISION_SOURCES
+from aegis.pipeline.decide import DECISION_SOURCES, AnyRuleParams
 from aegis.risk.policy import RiskPolicy
 from aegis.schemas.backtest import BacktestRunReport, SplitWindows, WindowMetrics
 from aegis.schemas.common import Timeframe
 from aegis.schemas.market import Candle, InstrumentRef, OrderBookTop
 from aegis.schemas.risk import RiskDecisionType
-from aegis.strategy.rules import RuleParams
 from aegis.supervisor.budgets import BudgetConfig, DailyCallLimiter
 
 PIPELINE_REPLAY_VERSION = "aegis-0.1.0-pipeline-replay"
@@ -78,6 +92,7 @@ class CycleFn(Protocol):
         correlation_id: str | None = None,
         spread_bps: Decimal | None = None,
         book_top: OrderBookTop | None = None,
+        htf_candles: Sequence[Candle] | None = None,
     ) -> Awaitable[PaperCycleResult]: ...
 
 
@@ -281,7 +296,7 @@ def _check_replay_preconditions(
     initial_quote_balance: Decimal,
     spread_bps: Decimal | None,
     decision_source: str,
-    rule_params: RuleParams | None,
+    rule_params: AnyRuleParams | None,
 ) -> None:
     if settings.trading_mode == TradingMode.LIVE:
         raise PipelineReplayError("pipeline replay refuses trading_mode=live")
@@ -319,9 +334,10 @@ async def replay_windows(
     strategy_id: str = "aegis-default",
     strategy_version: str = "0.1.0",
     decision_source: str = "llm",
-    rule_params: RuleParams | None = None,
+    rule_params: AnyRuleParams | None = None,
     cycle_fn: CycleFn | None = None,
     on_cycle: Callable[[str, Candle, PaperCycleResult], None] | None = None,
+    htf_candles: Sequence[Candle] | None = None,
 ) -> ReplayOutcome:
     """Replay final bars inside non-overlapping ``windows`` through the paper cycle.
 
@@ -329,7 +345,12 @@ async def replay_windows(
     history (no state crosses windows). Bars before a window start may appear in the
     trailing ``window_candles`` context (they are in the past: not look-ahead), but
     no decision is taken on them for that window.
+
+    ``htf_candles`` (optional): higher-timeframe bars; each cycle gets the trailing
+    ones closed by the bar's ``close_time``. Analysts run without an effective
+    timeout (``backtest_settings``).
     """
+    settings = backtest_settings(settings)
     _check_replay_preconditions(
         settings,
         window_candles=window_candles,
@@ -360,6 +381,7 @@ async def replay_windows(
     ]
     # One replayed copy per bar (identical to copying inside the loop, far cheaper).
     replayed = [as_replayed(c) for c in finals]
+    htf_index = None if htf_candles is None else HtfIndex(htf_candles, instrument=instrument)
 
     accs = {name: _WindowAccumulator(name, initial) for name in names}
     close_times: dict[str, list[datetime]] = {name: [] for name in names}
@@ -423,16 +445,29 @@ async def replay_windows(
         # Resting protective stop / target first (reduce-only, no Risk round-trip).
         apply_exits(broker, instrument, visible, now=clock)
 
-        result = await cycle(
-            visible,
-            deps=deps,
-            instrument=instrument,
-            timeframe=timeframe,
-            now=clock,
-            correlation_id=f"bt-{window_name}-{bar.open_time.isoformat()}",
-            spread_bps=spread_bps,
-            book_top=_synthetic_book(instrument, bar, spread_bps),
-        )
+        if htf_index is None:
+            result = await cycle(
+                visible,
+                deps=deps,
+                instrument=instrument,
+                timeframe=timeframe,
+                now=clock,
+                correlation_id=f"bt-{window_name}-{bar.open_time.isoformat()}",
+                spread_bps=spread_bps,
+                book_top=_synthetic_book(instrument, bar, spread_bps),
+            )
+        else:
+            result = await cycle(
+                visible,
+                deps=deps,
+                instrument=instrument,
+                timeframe=timeframe,
+                now=clock,
+                correlation_id=f"bt-{window_name}-{bar.open_time.isoformat()}",
+                spread_bps=spread_bps,
+                book_top=_synthetic_book(instrument, bar, spread_bps),
+                htf_candles=htf_index.visible(bar.close_time),
+            )
         counters["cycles"] += 1
         if not result.validation.ok:
             counters["validation_blocked"] += 1
@@ -470,7 +505,7 @@ def replay_assumptions(
     jev_port: JevPort,
     llm_port: LlmPort,
     decision_source: str,
-    rule_params: RuleParams | None,
+    rule_params: AnyRuleParams | None,
     data_source: str | None,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {
@@ -486,8 +521,13 @@ def replay_assumptions(
         "exit_model": (
             "protective stop/target on final bars after entry: open<=stop fills at "
             "open (gap), low<=stop fills at stop, high>=target fills at target; "
-            "stop first when both are in one bar; stop fills get slippage_bps, "
-            "target fills none; full position closed"
+            "stop first when both are in one bar; optional time stop (max_hold_bars) "
+            "closes at the N-th post-entry bar close after the level checks; stop and "
+            "time-stop fills get slippage_bps, target fills none; full position closed"
+        ),
+        "analyst_timeout_seconds": (
+            f"{BACKTEST_ANALYST_TIMEOUT_SECONDS} (backtest: effectively none, "
+            "load-independent)"
         ),
         "trade_pnl": "net of entry and exit fees; R = pnl / ((entry - stop) * qty)",
         "jev_port": type(jev_port).__name__,
@@ -547,8 +587,9 @@ async def replay_pipeline(
     cycle_fn: CycleFn | None = None,
     on_cycle: Callable[[str, Candle, PaperCycleResult], None] | None = None,
     decision_source: str = "llm",
-    rule_params: RuleParams | None = None,
+    rule_params: AnyRuleParams | None = None,
     data_source: str | None = None,
+    htf_candles: Sequence[Candle] | None = None,
 ) -> BacktestRunReport:
     """Replay finalized candles bar-by-bar through ``run_paper_cycle``.
 
@@ -582,6 +623,7 @@ async def replay_pipeline(
         rule_params=rule_params,
         cycle_fn=cycle_fn,
         on_cycle=on_cycle,
+        htf_candles=htf_candles,
     )
     assumptions = replay_assumptions(
         settings=settings,
@@ -596,6 +638,11 @@ async def replay_pipeline(
         rule_params=rule_params,
         data_source=data_source,
     )
+    if htf_candles is not None:
+        assumptions["htf_context"] = (
+            f"trailing {HTF_CONTEXT_BARS} higher-timeframe final bars with close_time <= "
+            "decision bar close_time (no look-ahead)"
+        )
     assumptions["counters"] = {k: str(v) for k, v in outcome.counters.items()}
     return BacktestRunReport(
         run_id=run_id or uuid4(),

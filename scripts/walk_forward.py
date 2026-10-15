@@ -9,6 +9,10 @@ train only, stitched OOS, Deflated Sharpe Ratio, and a final holdout evaluated
 Money/spread/min-trades values are required arguments (no invented defaults). The
 fold lengths (train=3, test=1, step=1, holdout=2 months) are engineering defaults.
 
+rules-v2 grids (``"strategy": "rules-v2"``) also load higher-timeframe candles
+(``--htf-interval``, default ``1d``) for the daily regime filter, starting
+``--htf-warmup-days`` before the trading data so the longest daily SMA is defined.
+
 Usage:
   .venv/bin/python scripts/walk_forward.py --symbol ADAUSDT --symbol BTCUSDT \\
       --exchange binance --grid grid.json --spread-bps 5 --initial-balance 100 \\
@@ -38,6 +42,7 @@ from aegis.backtest.walk_forward import (  # noqa: E402
     WalkForwardConfig,
     WalkForwardError,
     expand_grid,
+    grid_strategy,
     report_json,
     run_walk_forward,
 )
@@ -47,6 +52,7 @@ from aegis.config.settings import Settings, TradingMode, clear_settings_cache  #
 from aegis.market_data.candle_store import CandleStore  # noqa: E402
 from aegis.schemas.common import MarketType, Timeframe  # noqa: E402
 from aegis.schemas.market import Candle, InstrumentRef  # noqa: E402
+from aegis.strategy import STRATEGY_VERSION_V2  # noqa: E402
 
 _POLICY_11_ARGS: tuple[tuple[str, str], ...] = (
     ("risk_position_pct", "--risk-position-pct"),
@@ -96,6 +102,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--period-unit", choices=["months", "days"], default="months",
                    help="unit of the *-months values (days only for smoke tests)")
     p.add_argument("--window-candles", type=int, default=100)
+    p.add_argument("--htf-interval", default=Timeframe.D1.value,
+                   choices=[t.value for t in Timeframe],
+                   help="higher-timeframe candles for rules-v2 regime (default 1d)")
+    p.add_argument("--htf-warmup-days", type=int, default=320,
+                   help="days of higher-timeframe history loaded before --start")
     p.add_argument("--start", type=_date, default=None, help="optional ISO start (UTC)")
     p.add_argument("--end", type=_date, default=None, help="optional ISO end, exclusive (UTC)")
     p.add_argument("--workers", type=int, default=1)
@@ -229,6 +240,12 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines.append(f"| pooled | {pooled['r_trade_count']} | {_fmt(pooled['expectancy_r'])} | "
                  f"{ci_s} | - | {_fmt(pooled['net_pnl'])} | - | - |")
     lines.append("")
+    lines.extend(_exit_reason_lines(
+        "Stitched OOS exit reasons",
+        {**{s: v.get("exit_reasons", {}) for s, v in
+            report["oos_stitched"]["per_symbol"].items()},
+         "pooled": pooled.get("exit_reasons", {})},
+    ))
     dsr = report["dsr"]
     lines.append("### Deflated Sharpe Ratio")
     lines.append("")
@@ -267,12 +284,49 @@ def render_markdown(report: dict[str, Any]) -> str:
         ci_s = "n/a" if ci is None else f"[{ci[0]:.3f}, {ci[1]:.3f}]"
         lines.append(f"| pooled | {pm['r_trade_count']} | {_fmt(pm['expectancy_r'])} "
                      f"(avg R CI {ci_s}) | - | - | - |")
+        lines.append("")
+        lines.extend(_exit_reason_lines(
+            "Holdout exit reasons",
+            {**{s: m.get("counters", {}) for s, m in ho["per_symbol"].items()},
+             "pooled": pm.get("exit_reasons", {})},
+        ))
     else:
         lines.append(f"Not evaluated: {ho.get('reason')}")
     lines.append("")
     lines.append(f"> {HOLDOUT_NOTE}")
     lines.append("")
     return "\n".join(lines)
+
+
+def _exit_reason_lines(title: str, rows: dict[str, dict[str, Any]]) -> list[str]:
+    reasons = ("closed_stop_loss", "closed_take_profit", "closed_time_stop", "closed_signal")
+    out = [f"### {title}", "", "| Scope | " + " | ".join(r[7:] for r in reasons) + " |",
+           "| --- |" + " --- |" * len(reasons)]
+    for scope, counts in rows.items():
+        out.append(f"| {scope} | " + " | ".join(str(counts.get(r, 0)) for r in reasons) + " |")
+    out.append("")
+    return out
+
+
+def _load_htf(
+    store: CandleStore, args: argparse.Namespace, candles: dict[str, list[Candle]]
+) -> dict[str, list[Candle]]:
+    """Higher-timeframe candles from ``htf-warmup-days`` before the data to its end."""
+    out: dict[str, list[Candle]] = {}
+    interval = Timeframe(args.htf_interval)
+    for symbol, trading in candles.items():
+        inst = InstrumentRef(
+            exchange=args.exchange, market_type=MarketType(args.market_type), symbol=symbol
+        )
+        start = trading[0].open_time - timedelta(days=args.htf_warmup_days)
+        end = trading[-1].close_time + timedelta(milliseconds=1)
+        htf = store.load_range(inst, interval, start, end)
+        if store.last_error or not htf:
+            raise WalkForwardError(
+                f"htf load failed for {symbol}: {store.last_error or 'empty'}"
+            )
+        out[symbol] = htf
+    return out
 
 
 def _load(store: CandleStore, args: argparse.Namespace) -> dict[str, list[Candle]]:
@@ -315,6 +369,15 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(f"loaded {', '.join(f'{s}={len(c)}' for s, c in candles.items())} "
           f"in {time.monotonic() - t0:.1f}s; grid={len(grid)} skipped={len(skipped)}")
+    htf: dict[str, list[Candle]] | None = None
+    if grid_strategy(grid)[1] == STRATEGY_VERSION_V2:
+        try:
+            htf = _load_htf(store, args, candles)
+        except WalkForwardError as exc:
+            print(str(exc))
+            return 1
+        print(f"htf {args.htf_interval}: "
+              f"{', '.join(f'{s}={len(c)}' for s, c in htf.items())}")
 
     config = WalkForwardConfig(
         train=args.train_months,
@@ -340,11 +403,12 @@ def main(argv: list[str] | None = None) -> int:
             with ProcessPoolExecutor(max_workers=args.workers) as pool:
                 result = run_walk_forward(
                     candles, grid, config, settings=public, executor=pool,
-                    grid_skipped=skipped, progress=progress,
+                    grid_skipped=skipped, progress=progress, htf_candles_by_symbol=htf,
                 )
         else:
             result = run_walk_forward(
-                candles, grid, config, settings=public, grid_skipped=skipped, progress=progress
+                candles, grid, config, settings=public, grid_skipped=skipped,
+                progress=progress, htf_candles_by_symbol=htf,
             )
     except WalkForwardError as exc:
         print(f"walk-forward error: {exc}")

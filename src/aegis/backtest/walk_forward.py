@@ -25,6 +25,16 @@ Statistics: per-trade Sharpe of R-multiples and the Deflated Sharpe Ratio (Baile
 Lopez de Prado, 2014) are computed with ``float`` -- they are research statistics,
 not money. Prices, PnL and R stay ``Decimal`` in the replay itself.
 
+Strategies: grids are rules-v1 (``RuleParams``) or rules-v2 (``RuleParamsV2``,
+selected by ``"strategy": "rules-v2"`` in the grid spec); a grid never mixes them.
+rules-v2 needs higher-timeframe (daily) candles per symbol for its regime filter;
+each task carries only the daily bars needed for its window and every bar sees
+only daily bars closed by its ``close_time``.
+
+Determinism: analysts run with an effectively unbounded per-call timeout in
+backtests (``aegis.backtest.htf.backtest_settings``) so CPU load from parallel
+workers cannot change evidence.
+
 No exchange client is constructed. Candles may come from a research archive
 (e.g. ``binance-archive``); the replay keeps that exchange label on the instrument
 and records ``data_source`` -- Risk's instrument allowlist is by symbol.
@@ -48,6 +58,7 @@ from statistics import NormalDist
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
+from aegis.backtest.htf import HtfIndex
 from aegis.backtest.metrics import (
     RTrade,
     compute_window_metrics,
@@ -64,9 +75,27 @@ from aegis.risk.factory import build_risk_policy_from_settings
 from aegis.schemas.backtest import WindowMetrics
 from aegis.schemas.common import MarketType, Timeframe
 from aegis.schemas.market import Candle, InstrumentRef
-from aegis.strategy.rules import STRATEGY_ID as RULES_STRATEGY_ID
-from aegis.strategy.rules import STRATEGY_VERSION as RULES_STRATEGY_VERSION
-from aegis.strategy.rules import RuleParams
+from aegis.strategy import (
+    STRATEGY_ID,
+    STRATEGY_ID_V2,
+    STRATEGY_KEY,
+    STRATEGY_VERSION,
+    STRATEGY_VERSION_V2,
+    RuleParams,
+    RuleParamsV2,
+    params_from_dict,
+    strategy_version_of,
+)
+
+AnyParams = RuleParams | RuleParamsV2
+
+_V2_FIELDS: tuple[str, ...] = (
+    "regime_n",
+    "rsi_entry_max",
+    "k_atr_stop",
+    "r_target",
+    "max_hold_bars",
+)
 
 WALK_FORWARD_VERSION = "aegis-walk-forward-v1"
 REPORT_VERSION = "walk-forward-report-v1"
@@ -193,29 +222,54 @@ def _grid_value(name: str, raw: Any) -> str:
     return text
 
 
-def expand_grid(spec: Any) -> tuple[list[RuleParams], list[dict[str, str]]]:
-    """Expand a grid spec into unique ``RuleParams`` (order preserved).
+def _strategy_of(raw: Any) -> str:
+    if raw is None:
+        return STRATEGY_VERSION
+    if raw not in {STRATEGY_VERSION, STRATEGY_VERSION_V2}:
+        raise WalkForwardError(f"unknown grid strategy {raw!r}")
+    return str(raw)
+
+
+def _field_names(strategy: str) -> list[str]:
+    if strategy == STRATEGY_VERSION_V2:
+        return list(_V2_FIELDS)
+    return list(RuleParams.__dataclass_fields__)
+
+
+def expand_grid(spec: Any) -> tuple[list[AnyParams], list[dict[str, str]]]:
+    """Expand a grid spec into unique rule params (order preserved).
 
     ``spec`` is either a list of full parameter dicts, or a dict mapping each
-    ``RuleParams`` field to a scalar or a list (cartesian product, keys in
-    ``RuleParams`` field order). Invalid combinations (e.g. ``rsi_min >= rsi_max``)
-    are skipped and returned as the second element.
+    parameter field to a scalar or a list (cartesian product, keys in field order).
+    An optional ``"strategy"`` key selects ``rules-v1`` (default, ``RuleParams``)
+    or ``rules-v2`` (``RuleParamsV2``); all points must share one strategy.
+    Invalid combinations (e.g. ``rsi_min >= rsi_max``) are skipped and returned as
+    the second element (without the strategy key).
     """
-    names = list(RuleParams.__dataclass_fields__)
     raw_points: list[dict[str, str]] = []
+    strategy: str | None = None
     if isinstance(spec, list):
         for item in spec:
             if not isinstance(item, dict):
                 raise WalkForwardError("grid list entries must be objects")
-            raw_points.append({k: _grid_value(k, v) for k, v in item.items()})
+            item_strategy = _strategy_of(item.get(STRATEGY_KEY))
+            if strategy is not None and item_strategy != strategy:
+                raise WalkForwardError("grid must not mix strategies")
+            strategy = item_strategy
+            raw_points.append(
+                {k: _grid_value(k, v) for k, v in item.items() if k != STRATEGY_KEY}
+            )
     elif isinstance(spec, dict):
-        unknown = sorted(set(spec) - set(names))
-        missing = [n for n in names if n not in spec]
+        strategy = _strategy_of(spec.get(STRATEGY_KEY))
+        names = _field_names(strategy)
+        fields = {k: v for k, v in spec.items() if k != STRATEGY_KEY}
+        unknown = sorted(set(fields) - set(names))
+        missing = [n for n in names if n not in fields]
         if unknown or missing:
             raise WalkForwardError(f"grid keys invalid: missing={missing} unknown={unknown}")
         axes: list[list[str]] = []
         for n in names:
-            values = spec[n] if isinstance(spec[n], list) else [spec[n]]
+            values = fields[n] if isinstance(fields[n], list) else [fields[n]]
             if not values:
                 raise WalkForwardError(f"grid axis {n} is empty")
             axes.append([_grid_value(n, v) for v in values])
@@ -224,13 +278,13 @@ def expand_grid(spec: Any) -> tuple[list[RuleParams], list[dict[str, str]]]:
     else:
         raise WalkForwardError("grid must be a list of objects or an object of lists")
 
-    params: list[RuleParams] = []
+    params: list[AnyParams] = []
     skipped: list[dict[str, str]] = []
     seen: set[str] = set()
     for point in raw_points:
         try:
-            p = RuleParams.from_dict(point)
-        except (ValueError, TypeError):
+            p = params_from_dict({**point, STRATEGY_KEY: strategy or STRATEGY_VERSION})
+        except (ValueError, TypeError, KeyError):
             skipped.append(point)
             continue
         h = p.param_hash()
@@ -240,6 +294,15 @@ def expand_grid(spec: Any) -> tuple[list[RuleParams], list[dict[str, str]]]:
     if not params:
         raise WalkForwardError("grid has no valid parameter sets")
     return params, skipped
+
+
+def grid_strategy(grid: Sequence[AnyParams]) -> tuple[str, str]:
+    """``(strategy_id, strategy_version)`` of a homogeneous grid."""
+    versions = {strategy_version_of(p) for p in grid}
+    if len(versions) != 1:
+        raise WalkForwardError("grid must not mix strategies")
+    version = versions.pop()
+    return (STRATEGY_ID_V2 if version == STRATEGY_VERSION_V2 else STRATEGY_ID), version
 
 
 # ----------------------------------------------------------------------- statistics
@@ -332,7 +395,7 @@ class EvalTask:
     market_type: str
     timeframe: str
     window: ReplayWindow
-    param_sets: tuple[RuleParams, ...]
+    param_sets: tuple[AnyParams, ...]
     candles: tuple[Candle, ...]
     settings: Settings
     spread_bps: Decimal
@@ -340,6 +403,8 @@ class EvalTask:
     window_candles: int
     tag: str  # "train" | "test" | "holdout"
     fold: int | None
+    # Higher-timeframe bars needed for this window (rules-v2 regime); () = none.
+    htf_candles: tuple[Candle, ...] = ()
 
 
 @dataclass
@@ -402,6 +467,7 @@ def evaluate_task(task: EvalTask) -> EvalResult:
             spread_bps=task.spread_bps,
             initial_quote_balance=task.initial_balance,
             window_candles=task.window_candles,
+            htf_candles=task.htf_candles if task.htf_candles else None,
         )
     )
     bars = outcomes[0].counters["bars"] if outcomes else 0
@@ -642,7 +708,7 @@ def _run_tasks(
 
 def run_walk_forward(
     candles_by_symbol: Mapping[str, Sequence[Candle]],
-    grid: Sequence[RuleParams],
+    grid: Sequence[AnyParams],
     config: WalkForwardConfig,
     *,
     settings: Settings,
@@ -652,11 +718,13 @@ def run_walk_forward(
     now: datetime | None = None,
     grid_skipped: Sequence[Mapping[str, str]] = (),
     progress: Callable[[str], None] | None = None,
+    htf_candles_by_symbol: Mapping[str, Sequence[Candle]] | None = None,
 ) -> WalkForwardResult:
     """Run the walk-forward protocol (see module docstring) and build the report.
 
     The holdout task is created and evaluated only after every fold's selection is
-    final, with exactly one parameter set.
+    final, with exactly one parameter set. ``htf_candles_by_symbol`` (daily bars)
+    is required for rules-v2 grids.
     """
     if settings.trading_mode not in {TradingMode.PAPER, TradingMode.DEVELOPMENT}:
         raise WalkForwardError("walk-forward requires paper/development trading_mode")
@@ -664,6 +732,23 @@ def run_walk_forward(
         raise WalkForwardError("no symbols")
     if not grid:
         raise WalkForwardError("empty grid")
+    strategy_id, strategy_version = grid_strategy(grid)
+    htf_index: dict[str, HtfIndex] = {}
+    if htf_candles_by_symbol is not None:
+        for symbol in candles_by_symbol:
+            raw_htf = htf_candles_by_symbol.get(symbol)
+            if not raw_htf:
+                raise WalkForwardError(f"no higher-timeframe candles for {symbol}")
+            inst = InstrumentRef(
+                exchange=raw_htf[0].instrument.exchange,
+                market_type=config.market_type,
+                symbol=symbol,
+            )
+            htf_index[symbol] = HtfIndex(raw_htf, instrument=inst)
+            if not len(htf_index[symbol]):
+                raise WalkForwardError(f"no final higher-timeframe candles for {symbol}")
+    if strategy_version == STRATEGY_VERSION_V2 and not htf_index:
+        raise WalkForwardError("rules-v2 grid requires higher-timeframe candles per symbol")
     say = progress or (lambda _msg: None)
     rid = run_id or uuid4()
     created = now or datetime.now(tz=UTC)
@@ -693,6 +778,16 @@ def run_walk_forward(
             "last_close": fs[-1].close_time.isoformat(),
             "data_hash": hashes[symbol],
         }
+        if symbol in htf_index:
+            hx = htf_candles_by_symbol[symbol] if htf_candles_by_symbol else []
+            hfs = sorted((c for c in hx if c.is_final), key=lambda c: c.open_time)
+            data_info[symbol]["htf"] = {
+                "timeframe": hfs[0].interval.value,
+                "bars": len(hfs),
+                "first_open": hfs[0].open_time.isoformat(),
+                "last_close": hfs[-1].close_time.isoformat(),
+                "data_hash": dataset_hash(hfs),
+            }
 
     # Common span across symbols so every fold covers every symbol.
     data_start = max(fs[0].open_time for fs in finals.values())
@@ -714,9 +809,10 @@ def run_walk_forward(
 
     params_tuple = tuple(grid)
 
-    def _task(symbol: str, window: ReplayWindow, ps: tuple[RuleParams, ...], tag: str,
+    def _task(symbol: str, window: ReplayWindow, ps: tuple[AnyParams, ...], tag: str,
               fold: int | None) -> EvalTask:
         fs = finals[symbol]
+        hx = htf_index.get(symbol)
         return EvalTask(
             symbol=symbol,
             exchange=fs[0].instrument.exchange,
@@ -731,6 +827,7 @@ def run_walk_forward(
             window_candles=config.window_candles,
             tag=tag,
             fold=fold,
+            htf_candles=() if hx is None else hx.window_slice(window.start, window.end),
         )
 
     # ---- Selection phase: train + diagnostic test windows (never the holdout).
@@ -889,6 +986,8 @@ def run_walk_forward(
         )
 
     stitched_per_symbol = {s: _stitch(parts) for s, parts in oos_parts.items()}
+    for sym, sym_parts in oos_parts.items():
+        stitched_per_symbol[sym]["exit_reasons"] = exit_reason_counts(sym_parts)
     pooled_parts = [p for parts in oos_parts.values() for p in parts]
     pooled_r = [float(r) for p in pooled_parts for r in p.r_multiples]
     pooled_rts = [
@@ -910,6 +1009,7 @@ def run_walk_forward(
         "per_trade_sharpe_r": None if pooled_m is None else pooled_m.mean / pooled_m.std,
         "net_pnl": str(sum((p for x in pooled_parts for p in x.trade_pnls), _ZERO)),
         "folds_flat_no_eligible_params": sum(1 for v in selections.values() if v is None),
+        "exit_reasons": exit_reason_counts(pooled_parts),
     }
 
     # ---- DSR (on stitched pooled OOS per-trade R Sharpe).
@@ -1058,6 +1158,7 @@ def run_walk_forward(
                 "params": final_choice.params,
                 "per_symbol": per_symbol_ho,
                 "pooled": {
+                    "exit_reasons": exit_reason_counts(ho_trials),
                     "r_trade_count": len(ho_rts),
                     "expectancy_r": _decimal_str(ho_exp),
                     "avg_r_ci95_normal": None
@@ -1072,7 +1173,7 @@ def run_walk_forward(
         best_params = {
             "params": final_choice.params,
             "param_hash": final_choice.param_hash,
-            "strategy": RULES_STRATEGY_VERSION,
+            "strategy": strategy_version,
             "selected_by": (
                 f"walk-forward {WALK_FORWARD_VERSION} run {rid}: most recent fold "
                 f"{last_fold.index} train {last_fold.train.start.date()}.."
@@ -1092,7 +1193,7 @@ def run_walk_forward(
         "software_version": WALK_FORWARD_VERSION,
         "run_id": str(rid),
         "created_at": created.isoformat(),
-        "strategy": {"id": RULES_STRATEGY_ID, "version": RULES_STRATEGY_VERSION},
+        "strategy": {"id": strategy_id, "version": strategy_version},
         "config": {
             "unit": config.unit,
             "train": config.train,
@@ -1141,7 +1242,18 @@ def run_walk_forward(
                 "bar close); historical order books not stored"
             ),
             "fills": "PaperBroker immediate fill at decision-bar close +/- slippage",
-            "exits": "bar-resolution stop/target; stop first when both touched",
+            "exits": (
+                "bar-resolution stop/target; stop first when both touched; rules-v2 time "
+                "stop closes at the max_hold_bars-th post-entry bar close (after the "
+                "level checks) with slippage and fee"
+            ),
+            "htf": (
+                "none"
+                if not htf_index
+                else "daily bars with close_time <= decision bar close_time only "
+                "(trailing window, no look-ahead)"
+            ),
+            "analyst_timeout": "effectively none in backtests (load-independent)",
             "isolation": (
                 "fresh paper ledger, equity tracker and proposal history per (window, "
                 "symbol, grid point); open positions at window end are marked, not closed"
@@ -1169,6 +1281,16 @@ def run_walk_forward(
         "disclaimer": DISCLAIMER,
     }
     return WalkForwardResult(report=report, best_params=best_params, trial_records=trial_records)
+
+
+def exit_reason_counts(parts: Sequence[TrialResult]) -> dict[str, int]:
+    """Sum ``closed_<reason>`` counters (stop_loss / take_profit / time_stop / signal)."""
+    out: dict[str, int] = {}
+    for p in parts:
+        for k, v in p.counters.items():
+            if k.startswith("closed_") and k != "closed_trades":
+                out[k] = out.get(k, 0) + int(v)
+    return dict(sorted(out.items()))
 
 
 def _median(values: Sequence[float]) -> float | None:

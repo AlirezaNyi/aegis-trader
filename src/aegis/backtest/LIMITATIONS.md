@@ -71,7 +71,16 @@
   fees (the simple `BacktestRunner` still uses gross-minus-exit-fee). R-multiple =
   `pnl / ((entry - stop) * qty)`; `avg_r` = mean R; `expectancy_r` =
   `sum(pnl) / sum(initial risk)`. Counters: `exit_fills`, `closed_trades`,
-  `closed_stop_loss`, `closed_take_profit`, `closed_signal`.
+  `closed_stop_loss`, `closed_take_profit`, `closed_time_stop`, `closed_signal`.
+* **Time stop (rules-v2):** `max_hold_bars` closes at the N-th post-entry bar close
+  (bar resolution, after the level checks) with slippage and fee; see
+  `paper/LIMITATIONS.md`.
+* **Higher timeframe (rules-v2):** `htf_candles` (daily bars) are indexed once
+  (`backtest/htf.py::HtfIndex`); each bar's cycle receives the trailing
+  `HTF_CONTEXT_BARS` (210) daily bars with `close_time <= bar.close_time`. A daily bar
+  is visible to an intraday bar whose close equals the daily close (both complete at the
+  same instant). Archive daily bars are Binance's UTC day; Toobit's daily boundary is not
+  verified to match.
 * Per-window isolation: train / validation / OOS each get their own `PaperBroker`,
   `PaperLedger`, `PaperEquityTracker`, and `ProposalHistory`.
 * Refuses `trading_mode=live` (and any non paper/development mode).
@@ -91,12 +100,19 @@
 * It mirrors `pipeline.cycle._run_paper_cycle_body` step by step (same functions, same
   order). Equivalence with `run_paper_cycle` is asserted by
   `tests/test_backtest_walk_forward.py::test_multi_replay_equals_run_paper_cycle_per_param`
-  (and was checked on 3,000 real ADAUSDT bars × 4 points). **If the cycle body changes,
+  (and was checked on 3,000 real ADAUSDT bars × 4 points).
+  rules-v2 with daily context and the time stop is covered by
+  `tests/test_backtest_v2.py::test_multi_replay_v2_equals_run_paper_cycle_per_param`. **If the cycle body changes,
   update this module and re-run that test.**
 * Jev is evaluated once per bar and shared: only valid for deterministic Jev ports
   (the tuner always uses `UnavailableJevPort`).
-* Analyst timeouts (`analyst_timeout_seconds`) still apply; under heavy CPU contention an
-  analyst could in principle time out and change evidence for that bar.
+* Analyst timeouts: backtest paths (`replay_windows`, `replay_rules_multi`, hence the
+  walk-forward) run analysts with `backtest_settings`, i.e. a per-call timeout of 3600 s
+  (`BACKTEST_ANALYST_TIMEOUT_SECONDS`) instead of `analyst_timeout_seconds`. Reason:
+  rules-v1 runs under 6-worker load logged a few `analyst_timeout` events, making
+  evidence depend on CPU load. The paper soak / live-shaped cycle keeps the configured
+  timeout. A genuinely hung analyst would now stall a backtest instead of degrading.
+* Parameter sets may be rules-v1 or rules-v2 but must not be mixed in one call.
 
 ## Walk-forward tuning (`walk_forward.py`, script `scripts/walk_forward.py`)
 
@@ -125,3 +141,8 @@
   always written.
 * `RiskPolicy` is not picklable, so process-pool workers rebuild it from `Settings`
   (`risk_policy_version`; policy 1.1 needs explicit CLI percentages).
+
+* `BacktestRunner.run` (strategy-hook runner) does not catch blocked paper fills
+  (`PaperFillError` / `PaperTradingBlocked`, e.g. futures or intent-binding mismatch);
+  such a fill aborts the run (fail closed). The pipeline replay and walk-forward paths
+  catch them and count `fill_blocked`.
