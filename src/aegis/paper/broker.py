@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
@@ -15,9 +16,14 @@ from aegis.paper.protection import (
     ClosedTrade,
     ExitReason,
     ProtectiveLevels,
+    parse_max_hold_bars,
     parse_protective_level,
 )
-from aegis.risk.handoff import assert_may_submit_to_order_manager
+from aegis.risk.handoff import (
+    IntentBindingError,
+    assert_intent_matches_decision,
+    assert_may_submit_to_order_manager,
+)
 from aegis.schemas.common import LedgerKind
 from aegis.schemas.market import InstrumentRef
 from aegis.schemas.orders import Fill, Order, OrderIntent, OrderSide, OrderStatus
@@ -62,35 +68,37 @@ class PaperBroker:
         """Only APPROVE (non-expired) decisions bound to this intent may fill (INV-01)."""
         clock = now if now is not None else datetime.now(tz=UTC)
         assert_may_submit_to_order_manager(decision, now=clock)
+        self._assert_paper_path_allowed(intent)
         self._assert_decision_binds_intent(decision, intent)
         stop_loss: Decimal | None = None
         take_profit: Decimal | None = None
+        max_hold_bars: int | None = None
         if intent.side is OrderSide.BUY:
             # Protective levels come only from the APPROVED decision. Malformed
             # values fail closed (no fill) rather than open an unprotected position.
             params = decision.validated_order_params or {}
             stop_loss = parse_protective_level(params.get("stop_loss"), name="stop_loss")
             take_profit = parse_protective_level(params.get("take_profit"), name="take_profit")
+            entry_conditions = params.get("entry_conditions") or {}
+            if not isinstance(entry_conditions, Mapping):
+                raise PaperFillError("validated entry_conditions must be an object")
+            max_hold_bars = parse_max_hold_bars(entry_conditions.get("max_hold_bars"))
         return self._apply_approved_intent(
             intent,
             mid_price=mid_price,
             now=clock,
             stop_loss=stop_loss,
             take_profit=take_profit,
+            max_hold_bars=max_hold_bars,
         )
 
     def _assert_decision_binds_intent(
         self, decision: RiskDecision, intent: OrderIntent
     ) -> None:
-        if decision.proposal_id != intent.proposal_id:
-            raise PaperFillError(
-                "RiskDecision.proposal_id does not match OrderIntent.proposal_id"
-            )
-        if decision.correlation_id != intent.risk_decision_correlation_id:
-            raise PaperFillError(
-                "RiskDecision.correlation_id does not match "
-                "OrderIntent.risk_decision_correlation_id"
-            )
+        try:
+            assert_intent_matches_decision(decision, intent)
+        except IntentBindingError as exc:
+            raise PaperFillError(str(exc)) from exc
 
     def _apply_approved_intent(
         self,
@@ -100,6 +108,7 @@ class PaperBroker:
         now: datetime | None = None,
         stop_loss: Decimal | None = None,
         take_profit: Decimal | None = None,
+        max_hold_bars: int | None = None,
     ) -> Order:
         """Internal fill path — only reachable after Risk APPROVE + identity bind."""
         clock = now if now is not None else datetime.now(tz=UTC)
@@ -199,6 +208,7 @@ class PaperBroker:
                 fee=fee,
                 stop_loss=stop_loss,
                 take_profit=take_profit,
+                max_hold_bars=max_hold_bars,
                 client_order_id=intent.client_order_id,
                 now=clock,
             )
@@ -226,6 +236,7 @@ class PaperBroker:
         fee: Decimal,
         stop_loss: Decimal | None,
         take_profit: Decimal | None,
+        max_hold_bars: int | None,
         client_order_id: str,
         now: datetime,
     ) -> None:
@@ -233,7 +244,8 @@ class PaperBroker:
 
         Adding to an existing position: newly approved non-None levels replace the
         prior ones; a None level keeps the prior level (a stop is never silently
-        removed). ``opened_at`` moves to this fill so the entry bar is never scanned.
+        removed). ``opened_at`` moves to this fill so the entry bar is never scanned,
+        and the time-stop bar count restarts at 0 from this fill.
         """
         if position_entry is None or position_qty <= 0:
             self.ledger.protections.pop(key, None)
@@ -252,6 +264,10 @@ class PaperBroker:
             opened_at=now,
             entry_client_order_id=client_order_id,
             last_checked_open_time=None,
+            max_hold_bars=max_hold_bars if max_hold_bars is not None else (
+                prior.max_hold_bars if prior is not None else None
+            ),
+            bars_held=0,
         )
 
     def _record_reduction(
@@ -321,7 +337,7 @@ class PaperBroker:
         now: datetime,
         exchanged_at: datetime,
     ) -> tuple[Order, Fill, ClosedTrade]:
-        """Reduce-only full close of a paper long at a simulated SL/TP price.
+        """Reduce-only full close of a paper long at a simulated SL/TP/time-stop price.
 
         Only ``aegis.paper.exits.apply_exits`` calls this. It does not go through
         Risk (it can only shrink an existing paper position) and never touches an
@@ -329,7 +345,7 @@ class PaperBroker:
         simulated stop / target is modeled as already resting since entry.
         """
         self.assert_exit_path_allowed()
-        if reason not in {ExitReason.STOP_LOSS, ExitReason.TAKE_PROFIT}:
+        if reason not in {ExitReason.STOP_LOSS, ExitReason.TAKE_PROFIT, ExitReason.TIME_STOP}:
             raise PaperFillError(f"unsupported protective exit reason={reason!r}")
         if price <= 0:
             raise PaperFillError(f"protective exit price must be positive ({price})")
@@ -351,9 +367,9 @@ class PaperBroker:
             instrument=instrument,
             status=OrderStatus.FILLED,
             side=OrderSide.SELL,
-            # Stop modeled as a stop-market (slippage applied by caller); target
-            # as a resting limit at the take-profit price.
-            order_type="MARKET" if reason == ExitReason.STOP_LOSS else "LIMIT",
+            # Stop / time stop modeled as a market sell (slippage applied by caller);
+            # target as a resting limit at the take-profit price.
+            order_type="LIMIT" if reason == ExitReason.TAKE_PROFIT else "MARKET",
             quantity=quantity,
             filled_quantity=quantity,
             price=price,
@@ -415,4 +431,9 @@ class PaperBroker:
             raise PaperTradingBlocked(
                 "PaperBroker refuses submit when trading_mode=live "
                 "(use paper/development for simulation)"
+            )
+        if intent.instrument.market_type.value == "futures":
+            raise PaperTradingBlocked(
+                "PaperBroker refuses futures until margin, funding, and liquidation "
+                "semantics are implemented"
             )

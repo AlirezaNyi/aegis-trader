@@ -99,6 +99,26 @@ def _approve(
         price=Decimal(price),
         created_at=now,
     )
+    approved = dict(params or {})
+    approved.setdefault("action", side)
+    approved.setdefault("instrument", INST.model_dump(mode="json"))
+    entry = approved.get("entry_conditions")
+    if entry is None:
+        entry = {"order_type": "LIMIT", "entry_price": price}
+        approved["entry_conditions"] = entry
+    elif isinstance(entry, dict):
+        entry.setdefault("order_type", "LIMIT")
+        entry.setdefault("entry_price", price)
+    sizing = approved.get("sizing")
+    if sizing is None:
+        approved["sizing"] = {
+            "entry_price": price,
+            "notional": str(Decimal(quantity) * Decimal(price)),
+        }
+    elif isinstance(sizing, dict):
+        sizing.setdefault("entry_price", price)
+        sizing.setdefault("notional", str(Decimal(quantity) * Decimal(price)))
+    decision = decision.model_copy(update={"validated_order_params": approved})
     return decision, intent
 
 

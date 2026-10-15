@@ -1,4 +1,4 @@
-"""Simulated protective exits (stop-loss / take-profit) for paper long positions.
+"""Simulated protective exits (stop-loss / take-profit / time stop) for paper longs.
 
 Reduce-only simulation on finalized candles. Exits do **not** go through the Risk
 Engine: they can only close an existing paper position at a level that Risk already
@@ -12,8 +12,13 @@ Per candle (in ``open_time`` order, each candle evaluated at most once):
 * ``high >= target``-> target fills at the target
 * stop and target both inside one candle -> stop first (conservative)
 
-Stop fills get ``broker.slippage_bps`` against the seller; target fills get none.
-Fees use ``broker.fee_bps``. The full position quantity is closed.
+Time stop (optional, ``max_hold_bars`` from the approved decision's
+``entry_conditions``): every qualifying candle scanned increments ``bars_held``.
+After the stop / target checks on a candle (they keep priority), if
+``bars_held >= max_hold_bars`` the position closes at that candle's **close**.
+
+Stop and time-stop fills get ``broker.slippage_bps`` against the seller; target
+fills get none. Fees use ``broker.fee_bps``. The full position quantity is closed.
 """
 
 from __future__ import annotations
@@ -41,7 +46,8 @@ class ExitFill:
     order: Order
     fill: Fill
     exit_reason: ExitReason
-    # Level that triggered the exit: the stop, the target, or the gapped open.
+    # Level that triggered the exit: the stop, the target, the gapped open, or the
+    # bar close for a time stop.
     trigger_price: Decimal
     gap: bool
     candle_open_time: datetime
@@ -89,7 +95,8 @@ def apply_exits(
     Eligible candles: ``is_final``, same instrument, ``close_time <= now`` (no
     look-ahead), ``close_time > entry fill time`` (the entry bar is never scanned;
     the next bar is, even when its ``open_time`` equals the replay fill clock), and
-    ``open_time > last checked``. Idempotent: calling twice with the same candles
+    ``open_time > last checked``. Each eligible candle counts once toward the time
+    stop (``bars_held``). Idempotent: calling twice with the same candles
     yields at most one exit. Returns ``[]`` or a single full-close ``ExitFill``.
     """
     broker.assert_exit_path_allowed()
@@ -100,7 +107,11 @@ def apply_exits(
     position = ledger.positions.get(key)
     if protection is None or position is None or position.quantity <= 0:
         return []
-    if protection.stop_loss is None and protection.take_profit is None:
+    if (
+        protection.stop_loss is None
+        and protection.take_profit is None
+        and protection.max_hold_bars is None
+    ):
         return []
 
     last_checked = protection.last_checked_open_time
@@ -126,13 +137,19 @@ def apply_exits(
             take_profit=protection.take_profit,
         )
         protection.last_checked_open_time = open_time
+        protection.bars_held += 1
+        if hit is None and (
+            protection.max_hold_bars is not None
+            and protection.bars_held >= protection.max_hold_bars
+        ):
+            hit = (ExitReason.TIME_STOP, candle.close, False)
         if hit is None:
             continue
         reason, trigger, gap = hit
         price = (
-            stop_fill_price(trigger, broker.slippage_bps)
-            if reason == ExitReason.STOP_LOSS
-            else trigger
+            trigger
+            if reason == ExitReason.TAKE_PROFIT
+            else stop_fill_price(trigger, broker.slippage_bps)
         )
         # Package-private, reduce-only fill path (no public Risk bypass exists).
         order, fill, trade = broker._fill_protective_exit(

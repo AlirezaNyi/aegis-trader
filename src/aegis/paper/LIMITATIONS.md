@@ -91,8 +91,18 @@
 * Exits are reduce-only simulation and do **not** go through Risk. They are refused in live
   mode and allowed under the kill switch (the simulated stop is modeled as resting since
   entry). Live protective exits are out of scope and need an owner ADR (ADR 0006).
+* Time stop (rules-v2): a BUY whose approved `validated_order_params.entry_conditions`
+  carries `max_hold_bars` records it with the levels (persisted in snapshots / state
+  store; older payloads load without it). Each eligible final bar scanned increments
+  `bars_held`; after the stop/target checks on a bar (they keep priority), if
+  `bars_held >= max_hold_bars` the position closes at that bar's **close** minus
+  `slippage_bps`, plus `fee_bps` (exit reason `time_stop`, MARKET). Malformed values
+  (bool, float, ≤ 0, non-integer) fail closed: no fill. Adding to a position restarts the
+  count at the new fill and keeps the prior `max_hold_bars` when the new approval has none.
+  Simulation only; there is no live time-stop path.
 * Exit orders are tagged by `client_order_id` prefix `paper-exit-stop_loss-` /
-  `paper-exit-take_profit-` (the `Order` schema has no reason field).
+  `paper-exit-take_profit-` / `paper-exit-time_stop-` (the `Order` schema has no reason
+  field).
 * `realized_pnl` is net of entry and exit fees; `R = realized_pnl / ((entry - stop) * qty)`
   (price risk only; costs are in the numerator).
 

@@ -101,7 +101,22 @@ def _paired_approve_intent(**intent_kwargs: object) -> tuple[RiskDecision, Order
     proposal_id = uuid4()
     intent = _intent(proposal_id=proposal_id, **intent_kwargs)  # type: ignore[arg-type]
     decision = _decision(RiskDecisionType.APPROVE, proposal_id=proposal_id)
-    return decision, intent
+    entry_price = intent.price
+    if entry_price is None:
+        raise AssertionError("paper test intents require a price")
+    params = {
+        "action": intent.side.value,
+        "instrument": intent.instrument.model_dump(mode="json"),
+        "entry_conditions": {
+            "entry_price": str(entry_price),
+            "order_type": intent.order_type,
+        },
+        "sizing": {
+            "entry_price": str(entry_price),
+            "notional": str(entry_price * intent.quantity),
+        },
+    }
+    return decision.model_copy(update={"validated_order_params": params}), intent
 
 
 def test_reject_cannot_create_paper_order() -> None:
@@ -241,3 +256,23 @@ async def test_null_execution_still_refuses_live() -> None:
     port = NullExecutionPort()
     with pytest.raises(RuntimeError):
         await port.submit(_intent(ledger_kind=LedgerKind.LIVE))
+
+
+def test_futures_paper_execution_is_explicitly_blocked() -> None:
+    broker = PaperBroker(_settings(), initial_quote_balance=Decimal("10000"))
+    decision, intent = _paired_approve_intent(quantity=Decimal("1"), price=Decimal("100"))
+    futures = intent.model_copy(
+        update={
+            "instrument": InstrumentRef(
+                exchange="toobit",
+                market_type=MarketType.FUTURES,
+                symbol="BTCUSDT",
+            )
+        }
+    )
+    with pytest.raises(PaperTradingBlocked, match="futures"):
+        broker.submit_from_risk_decision(
+            decision,
+            futures,
+            now=datetime(2026, 10, 9, tzinfo=UTC),
+        )

@@ -23,6 +23,9 @@ class ExitReason(StrEnum):
     TAKE_PROFIT = "take_profit"
     # Risk-approved SELL decision (Supervisor/Risk path), not a protective exit.
     SIGNAL = "signal"
+    # Time stop: ``max_hold_bars`` qualifying bars held without SL/TP -> close at
+    # that bar's close (paper/backtest simulation only).
+    TIME_STOP = "time_stop"
 
 
 def parse_protective_level(raw: Any, *, name: str) -> Decimal | None:
@@ -37,6 +40,30 @@ def parse_protective_level(raw: Any, *, name: str) -> Decimal | None:
         raise PaperFillError(f"{name} is not numeric ({raw!r})") from exc
     if not value.is_finite() or value <= 0:
         raise PaperFillError(f"{name} must be a positive finite number ({raw!r})")
+    return value
+
+
+def parse_max_hold_bars(raw: Any) -> int | None:
+    """Parse an approved time stop (bars). Malformed values raise (fail closed, no fill).
+
+    Accepts a positive ``int`` (or a base-10 integer string); ``None`` means no time
+    stop. Booleans, floats, zero and negatives are rejected.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        raise PaperFillError("max_hold_bars must be an int, got bool")
+    if isinstance(raw, int):
+        value = raw
+    elif isinstance(raw, str):
+        try:
+            value = int(raw, 10)
+        except ValueError as exc:
+            raise PaperFillError(f"max_hold_bars is not an integer ({raw!r})") from exc
+    else:
+        raise PaperFillError(f"max_hold_bars must be an int ({raw!r})")
+    if value < 1:
+        raise PaperFillError(f"max_hold_bars must be >= 1 ({raw!r})")
     return value
 
 
@@ -55,6 +82,20 @@ def _opt_dec(raw: Any) -> Decimal | None:
     return None if raw is None else _dec(raw)
 
 
+def _non_negative_int(raw: Any, *, name: str) -> int:
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        raise ValueError(f"{name} must be a non-negative int ({raw!r})")
+    return raw
+
+
+def _opt_hold(raw: Any) -> int | None:
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        raise ValueError(f"max_hold_bars must be a positive int ({raw!r})")
+    return raw
+
+
 def _opt_dt(raw: Any) -> datetime | None:
     return None if raw is None else _aware(datetime.fromisoformat(str(raw)))
 
@@ -67,6 +108,8 @@ class ProtectiveLevels:
     ``entry_fees`` the entry fees attributable to ``quantity``. ``opened_at`` is the
     latest entry fill clock; only candles with ``close_time > opened_at`` are ever
     checked for exits. ``last_checked_open_time`` makes exit scanning idempotent.
+    ``max_hold_bars`` (optional time stop) and ``bars_held`` (qualifying final bars
+    scanned since ``opened_at``) are persisted with the levels.
     """
 
     stop_loss: Decimal | None
@@ -77,6 +120,8 @@ class ProtectiveLevels:
     opened_at: datetime
     entry_client_order_id: str
     last_checked_open_time: datetime | None = None
+    max_hold_bars: int | None = None
+    bars_held: int = 0
 
     def initial_risk(self, quantity: Decimal | None = None) -> Decimal | None:
         """``(entry - stop) * qty``; None when no stop or the stop is not below entry."""
@@ -102,6 +147,8 @@ class ProtectiveLevels:
                 if self.last_checked_open_time is None
                 else _aware(self.last_checked_open_time).isoformat()
             ),
+            "max_hold_bars": self.max_hold_bars,
+            "bars_held": self.bars_held,
         }
 
     @classmethod
@@ -118,6 +165,8 @@ class ProtectiveLevels:
             opened_at=opened,
             entry_client_order_id=str(raw["entry_client_order_id"]),
             last_checked_open_time=_opt_dt(raw.get("last_checked_open_time")),
+            max_hold_bars=_opt_hold(raw.get("max_hold_bars")),
+            bars_held=_non_negative_int(raw.get("bars_held", 0), name="bars_held"),
         )
 
 
