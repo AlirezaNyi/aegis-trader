@@ -151,3 +151,14 @@ async def test_ws_unexpected_error_propagates() -> None:
     )
     with pytest.raises(RuntimeError):
         await client.run_forever()
+
+
+def test_ws_client_refuses_unverified_intervals() -> None:
+    import pytest
+
+    from aegis.market_data.ws_client import ToobitWsMarketDataClient
+    from aegis.schemas.common import Timeframe
+
+    for tf in (Timeframe.H1, Timeframe.D1):
+        with pytest.raises(ValueError, match="unsupported Toobit kline interval"):
+            ToobitWsMarketDataClient(symbols=["BTCUSDT"], interval=tf)

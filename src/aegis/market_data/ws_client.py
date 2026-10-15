@@ -16,7 +16,12 @@ from typing import Any
 
 from websockets.exceptions import WebSocketException
 
-from aegis.market_data.constants import WS_BASE_URL, WS_MARKET_PATH, WS_PING_INTERVAL_SECONDS
+from aegis.market_data.constants import (
+    SUPPORTED_KLINE_INTERVALS,
+    WS_BASE_URL,
+    WS_MARKET_PATH,
+    WS_PING_INTERVAL_SECONDS,
+)
 from aegis.market_data.klines import MalformedKlineError, parse_ws_kline_payload
 from aegis.market_data.metrics import MarketDataMetrics
 from aegis.market_data.quality import CandleStreamTracker, DataQualityIssueKind
@@ -47,6 +52,9 @@ class ToobitWsMarketDataClient:
         ping_interval_seconds: float = WS_PING_INTERVAL_SECONDS,
         max_backoff_seconds: float = 30.0,
     ) -> None:
+        if interval.value not in SUPPORTED_KLINE_INTERVALS:
+            # Same allowlist as REST: only Toobit-verified kline topics.
+            raise ValueError(f"unsupported Toobit kline interval: {interval.value!r}")
         self._symbols = list(symbols)
         self._interval = interval
         self._market_type = market_type

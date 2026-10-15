@@ -21,6 +21,11 @@ class Timeframe(StrEnum):
     M1 = "1m"
     M5 = "5m"
     M15 = "15m"
+    # Research/backtest timeframe (Binance archive). Toobit 1h klines are not yet
+    # verified in docs/API_CONTRACTS.md; do not use for live soak until verified.
+    H1 = "1h"
+    # Research higher-timeframe regime (Binance archive); Toobit 1d unverified.
+    D1 = "1d"
 
 
 class LedgerKind(StrEnum):
