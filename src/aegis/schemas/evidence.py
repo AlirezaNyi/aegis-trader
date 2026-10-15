@@ -61,6 +61,27 @@ class MarketContext(ApiModel):
     as_of: datetime
 
 
+HTF_SMA_LOOKBACKS: tuple[int, ...] = (20, 50, 100, 200)
+
+
+class HigherTimeframeContext(ApiModel):
+    """Descriptive higher-timeframe (e.g. daily) regime levels (no look-ahead).
+
+    Built only from **completed** higher-timeframe bars whose ``close_time`` is at or
+    before the trading package ``as_of``; a bar still forming is excluded. ``as_of``
+    is the ``close_time`` of the last completed bar used. ``sma`` maps each fixed
+    lookback in :data:`HTF_SMA_LOOKBACKS` (as a string key, e.g. ``"50"``) to the
+    simple mean of the last N closes, or ``None`` when fewer than N bars exist.
+    Descriptive only; not a trade signal or sizing input.
+    """
+
+    timeframe: Timeframe
+    as_of: datetime
+    last_close: Decimal
+    sma: dict[str, Decimal | None] = Field(default_factory=dict)
+    bars_available: int
+
+
 class EvidencePackage(ApiModel):
     schema_version: str = "1"
     package_id: UUID
@@ -73,3 +94,4 @@ class EvidencePackage(ApiModel):
     feature_refs: list[str] = Field(default_factory=list)
     analyst_evidence: list[AnalystEvidence] = Field(default_factory=list)
     market_context: MarketContext | None = None
+    htf_context: HigherTimeframeContext | None = None
