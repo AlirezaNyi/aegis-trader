@@ -38,7 +38,7 @@ from aegis.paper.state_store import PaperStateStore
 from aegis.pipeline.activity import ActivityState
 from aegis.pipeline.audit import DecisionAuditStore
 from aegis.pipeline.cycle import PaperCycleDeps, run_paper_cycle
-from aegis.pipeline.decide import RuleParamsUnavailable, load_rule_params
+from aegis.pipeline.decide import AnyRuleParams, RuleParamsUnavailable, load_rule_params
 from aegis.pipeline.journal import PaperCycleJournal
 from aegis.pipeline.soak import (
     PaperSoakRunner,
@@ -48,7 +48,6 @@ from aegis.pipeline.soak import (
 )
 from aegis.reconcile.service import Reconciler
 from aegis.risk.factory import build_risk_policy_from_settings, missing_policy_env
-from aegis.strategy.rules import RuleParams
 from aegis.supervisor.factory import (
     budget_config_from_settings,
     build_call_limiter,
@@ -65,7 +64,7 @@ def _should_start_paper_soak(settings: Settings) -> bool:
     )
 
 
-def _load_rule_params_or_none(settings: Settings, logger: Any) -> RuleParams | None:
+def _load_rule_params_or_none(settings: Settings, logger: Any) -> AnyRuleParams | None:
     """Rule params for rules modes; failure => None => every cycle NO_TRADE."""
     if settings.decision_source == "llm":
         return None

@@ -23,12 +23,20 @@ from aegis.interfaces.llm import LlmPort
 from aegis.logging import get_logger
 from aegis.schemas.evidence import EvidencePackage, JevResult
 from aegis.schemas.proposal import ProposalAction, TradeProposal
-from aegis.strategy.rules import STRATEGY_VERSION as RULES_VERSION
-from aegis.strategy.rules import RuleParams, decide
+from aegis.strategy import (
+    decide_any,
+    max_hold_bars_of,
+    params_from_dict,
+    strategy_version_of,
+)
+from aegis.strategy.rules import RuleParams
+from aegis.strategy.rules_v2 import RuleParamsV2
 from aegis.supervisor.budgets import BudgetConfig, DailyCallLimiter
 from aegis.supervisor.decision import ProposalDefaults, proposal_from_decision
 from aegis.supervisor.gates import evaluate_pre_llm_gates
 from aegis.supervisor.supervise import no_trade_proposal, supervise
+
+AnyRuleParams = RuleParams | RuleParamsV2
 
 logger = get_logger("aegis.pipeline.decide")
 
@@ -39,7 +47,7 @@ class RuleParamsUnavailable(RuntimeError):
     """Rule parameters could not be loaded; callers must fail closed."""
 
 
-def load_rule_params(path: str | None) -> RuleParams:
+def load_rule_params(path: str | None) -> AnyRuleParams:
     if not path:
         raise RuleParamsUnavailable("rule_params_file not set")
     try:
@@ -51,7 +59,7 @@ def load_rule_params(path: str | None) -> RuleParams:
     if not isinstance(data, dict):
         raise RuleParamsUnavailable("rule params must be a JSON object")
     try:
-        return RuleParams.from_dict(data)
+        return params_from_dict(data)
     except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
         raise RuleParamsUnavailable(f"rule params invalid: {type(exc).__name__}") from exc
 
@@ -67,7 +75,7 @@ async def make_proposal(
     jev_result: JevResult,
     *,
     decision_source: str,
-    rule_params: RuleParams | None,
+    rule_params: AnyRuleParams | None,
     llm: LlmPort,
     budgets: BudgetConfig | None,
     timeout_seconds: float,
@@ -113,10 +121,10 @@ async def make_proposal(
     if gate_reasons:
         return _no_trade(gate_reasons)
 
-    decision = decide(package, rule_params)
+    decision = decide_any(package, rule_params)
     rule_meta = {
         "decision_source": decision_source,
-        "rule_strategy": RULES_VERSION,
+        "rule_strategy": strategy_version_of(rule_params),
         "rule_params_hash": rule_params.param_hash(),
     }
     rule_proposal = _with_meta(
@@ -131,6 +139,12 @@ async def make_proposal(
         ),
         rule_meta,
     )
+    hold = max_hold_bars_of(rule_params)
+    if hold is not None and rule_proposal.action in {ProposalAction.BUY, ProposalAction.SELL}:
+        # Time stop travels with the approved order params to the exit simulator.
+        entry = dict(rule_proposal.entry_conditions)
+        entry["max_hold_bars"] = int(hold)
+        rule_proposal = rule_proposal.model_copy(update={"entry_conditions": entry})
     if rule_proposal.action not in {ProposalAction.BUY, ProposalAction.SELL}:
         # Machine-readable reason ("no_trade:<condition>") for review/journal.
         unc = dict(rule_proposal.uncertainty)

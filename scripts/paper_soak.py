@@ -29,7 +29,11 @@ from aegis.market_data.rest_client import ToobitRestMarketDataClient  # noqa: E4
 from aegis.ops.shutdown import ShutdownGate  # noqa: E402
 from aegis.paper.broker import PaperBroker  # noqa: E402
 from aegis.pipeline.cycle import PaperCycleDeps  # noqa: E402
-from aegis.pipeline.decide import RuleParamsUnavailable, load_rule_params  # noqa: E402
+from aegis.pipeline.decide import (  # noqa: E402
+    AnyRuleParams,
+    RuleParamsUnavailable,
+    load_rule_params,
+)
 from aegis.pipeline.review import format_review_text, summarize_soak_outcome  # noqa: E402
 from aegis.pipeline.soak import (  # noqa: E402
     PaperSoakRunner,
@@ -38,7 +42,6 @@ from aegis.pipeline.soak import (  # noqa: E402
     soak_timeframe_from_settings,
 )
 from aegis.risk.factory import build_risk_policy_from_settings  # noqa: E402
-from aegis.strategy.rules import RuleParams  # noqa: E402
 from aegis.supervisor.factory import (  # noqa: E402
     budget_config_from_settings,
     build_call_limiter,
@@ -65,7 +68,7 @@ def _jev_line(outcome: object) -> str:
     )
 
 
-def _rule_params(settings: Settings) -> RuleParams | None:
+def _rule_params(settings: Settings) -> AnyRuleParams | None:
     if settings.decision_source == "llm":
         return None
     try:

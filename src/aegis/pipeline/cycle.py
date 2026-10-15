@@ -31,7 +31,7 @@ from aegis.paper.state_store import PaperStateStore
 from aegis.pipeline.activity import ActivityStage, ActivityState
 from aegis.pipeline.audit import DecisionAuditStore
 from aegis.pipeline.context import build_paper_risk_context
-from aegis.pipeline.decide import make_proposal
+from aegis.pipeline.decide import AnyRuleParams, make_proposal
 from aegis.pipeline.defaults import proposal_defaults_from_policy
 from aegis.pipeline.intent import IntentBuildError, intent_from_approved
 from aegis.risk.engine import evaluate_risk
@@ -43,7 +43,6 @@ from aegis.schemas.market import Candle, InstrumentRef, OrderBookTop
 from aegis.schemas.orders import Order
 from aegis.schemas.proposal import TradeProposal
 from aegis.schemas.risk import RiskDecision, RiskDecisionType
-from aegis.strategy.rules import RuleParams
 from aegis.supervisor.budgets import BudgetConfig, DailyCallLimiter
 from aegis.supervisor.supervise import no_trade_proposal
 from aegis.validation.stage import ValidationResult, validate_candles
@@ -74,7 +73,7 @@ class PaperCycleDeps:
     state_store: PaperStateStore | None = None
     # llm | rules | rules+llm (see pipeline/decide.py); rules need rule_params.
     decision_source: str = "llm"
-    rule_params: RuleParams | None = None
+    rule_params: AnyRuleParams | None = None
 
 
 def _notify_activity(
@@ -219,6 +218,7 @@ async def _run_paper_cycle_body(
     correlation_id: str | None = None,
     spread_bps: Decimal | None = None,
     book_top: OrderBookTop | None = None,
+    htf_candles: Sequence[Candle] | None = None,
 ) -> PaperCycleResult:
     """Run one decision cycle on finalized candles. Paper/development only.
 
@@ -394,6 +394,7 @@ async def _run_paper_cycle_body(
         created_at=clock,
         candles=validation.candles,
         spread_bps=spread_bps,
+        htf_candles=htf_candles,
     )
     _notify_activity(
         deps,
@@ -520,6 +521,7 @@ async def run_paper_cycle(
     correlation_id: str | None = None,
     spread_bps: Decimal | None = None,
     book_top: OrderBookTop | None = None,
+    htf_candles: Sequence[Candle] | None = None,
 ) -> PaperCycleResult:
     """Run one paper decision cycle, then persist paper ledger + period state.
 
@@ -542,6 +544,7 @@ async def run_paper_cycle(
         correlation_id=correlation_id,
         spread_bps=spread_bps,
         book_top=book_top,
+        htf_candles=htf_candles,
     )
     if deps.state_store is not None and deps.settings.trading_mode != TradingMode.LIVE:
         await asyncio.to_thread(
